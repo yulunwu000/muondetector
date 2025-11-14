@@ -1,0 +1,17 @@
+/Detector.X/dist/
+/Detector.X/build/
+# Ignore MPLAB X build folders for any project
+**/build/
+**/dist/
+
+# Ignore MPLAB X private configuration
+**/nbproject/private/
+
+# Ignore compiled binary files
+*.o
+*.hex
+*.elf
+*.map
+
+# macOS metadata
+.DS_Store
