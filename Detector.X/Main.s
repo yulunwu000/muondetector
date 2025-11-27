@@ -1,7 +1,14 @@
     PROCESSOR   18F87J50
     
   ; === Configuration for PIC18F87J50 clicker2 ===
+    ; Tell XC8 which PIC18 device we are using
+    #define __18F87J50    1
+
+    ; Core assembler definitions (required)
     #include <xc.inc>
+
+    ;Device-specific SFR definitions for PIC18F87J50
+     #include <proc/pic18f87j50.inc>
 
     ; CONFIG1L
     ;CONFIG  RETEN = ON
@@ -73,7 +80,7 @@ start:
 
     ; ADCON2: right-justified, ACQT & ADCS set
     movlw   0xBE        ; ADFM=1, ACQT=111, ADCS=110 (Fosc/64)
-    movwf   ADCON2, A
+    movwf   ADCON1, A
 
     ; ADCON0: select AN0, turn ADC on
     movlw   0x1        ; CHS=0000 (AN0), ADON=1
