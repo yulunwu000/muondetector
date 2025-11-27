@@ -1,8 +1,41 @@
     PROCESSOR   18F87J50
+    
+  ; === Configuration for PIC18F87J50 clicker2 ===
     #include <xc.inc>
 
-    CONFIG  XINST = OFF      ; disable extended instruction set
-    ; (you'll still get warnings about other CONFIG bits until you set them)
+    ; CONFIG1L
+    ;CONFIG  RETEN = ON
+    ;CONFIG  INTOSCSEL = HIGH
+    ;CONFIG  SOSCSEL = DIG
+    CONFIG  STVREN = ON
+    CONFIG  XINST  = OFF
+    CONFIG  WDTEN  = OFF
+    CONFIG  PLLDIV = 2
+    CONFIG  DEBUG  = ON        ; OFF if just programming, not debugging
+
+    ; CONFIG1H
+    CONFIG  CP0    = OFF
+    CONFIG  CPUDIV = OSC1      ; 8 MHz from crystal straight to CPU
+
+    ; CONFIG2L
+    CONFIG  IESO   = OFF
+    CONFIG  FCMEN  = OFF
+    CONFIG  FOSC   = HS        ; matches the clicker2 crystal
+
+    ; CONFIG2H
+    CONFIG  WDTPS  = 32768
+
+    ; CONFIG3L
+    CONFIG  EASHFT = ON
+    CONFIG  BW     = 16
+    CONFIG  WAIT   = OFF
+    CONFIG  MODE   = MM
+
+    ; CONFIG3H
+    CONFIG  CCP2MX  = DEFAULT
+    CONFIG  ECCPMX  = DEFAULT
+    CONFIG  MSSPMSK = 1
+    CONFIG  PMPMX   = DEFAULT
 
 ;--------------------------------------
 ; Reset vector
@@ -27,9 +60,8 @@ start:
 
     ;-----------------------------
     ; Configure analog pins
-    ; bit = 0 -> analog, 1 -> digital
     ;-----------------------------
-    movlw   0b11111110        ; AN0 analog, AN1?AN7 digital
+    movlw   0xFE              ; AN0 analog, AN1?AN7 digital
     movwf   ANCON0, A
     movlw   0xFF              ; AN8?AN12 digital
     movwf   ANCON1, A
@@ -40,15 +72,15 @@ start:
     clrf    ADCON1, A         ; Vref+ = Vdd, Vref- = Vss
 
     ; ADCON2: right-justified, ACQT & ADCS set
-    movlw   0b10111110        ; ADFM=1, ACQT=111, ADCS=110 (Fosc/64)
+    movlw   0xBE        ; ADFM=1, ACQT=111, ADCS=110 (Fosc/64)
     movwf   ADCON2, A
 
     ; ADCON0: select AN0, turn ADC on
-    movlw   0b00000001        ; CHS=0000 (AN0), ADON=1
+    movlw   0x1        ; CHS=0000 (AN0), ADON=1
     movwf   ADCON0, A
 
 main_loop:
-    ; Small acquisition delay (optional)
+    ; Small acquisition delay
     nop
     nop
 
