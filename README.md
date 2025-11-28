@@ -4,8 +4,6 @@ This repository contains custom assembly firmware for a muon detector based on t
 The detector uses a **plastic scintillator** coupled to a **Silicon Photomultiplier (SiPM)** to detect muons and other charged particles. The project is inspired by the open-source **CosmicWatch Desktop Muon Detector** (MIT/NCBJ) and replaces the original Arduino-based electronics with a custom PIC18 firmware and ADC readout path.  
 See the CosmicWatch instruction manual for the reference detector design: http://www.cosmicwatch.lns.mit.edu/detector
 
----
-
 ## 🎯 Project Goal
 
 The primary goal is to reproduce the CosmicWatch functionality using a PIC18 microcontroller and
@@ -18,7 +16,6 @@ low-level assembly to achieve:
 
 The firmware reads out analogue pulses produced by a **SiPM** when a cosmic muon passes through a scintillator block. The pulses are conditioned by an external amplification and peak-detection circuit, then digitised by the PIC18 ADC.
 
----
 
 ## 🧱 Hardware Overview
 
@@ -40,8 +37,6 @@ The firmware reads out analogue pulses produced by a **SiPM** when a cosmic muon
   - USB support  
   - Plenty of RAM/Flash for data buffering  
 - Firmware written in **PIC18 assembly** using MPLAB X.
-
----
 
 ## 🔧 Firmware Features
 
