@@ -59,59 +59,44 @@ reset_vector:
     ORG     0x0100
 
 start:
-    ;-----------------------------
-    ; I/O setup
-    ;-----------------------------
-    clrf    TRISB, A          ; all PORTB as outputs (LED/debug)
-    bsf     TRISA, 0, A       ; RA0 = input (AN0)
+    ;------------------------------------------------
+    ; Make PORTD digital and set RD4 as output
+    ;------------------------------------------------
+    movlw   0xFF
+    movwf   ANCON0, A        ; all AN0?AN7 digital
+    movwf   ANCON1, A        ; all AN8?AN12 digital
 
-    ;-----------------------------
-    ; Configure analog pins
-    ;-----------------------------
-    movlw   0xFE              ; AN0 analog, AN1?AN7 digital
-    movwf   ANCON0, A
-    movlw   0xFF              ; AN8?AN12 digital
-    movwf   ANCON1, A
+    clrf    TRISD, A         ; all PORTD pins outputs
+    bcf     LATD, 4, A       ; start with LED off on RD4
 
-    ;-----------------------------
-    ; ADC setup
-    ;-----------------------------
-    clrf    ADCON1, A         ; Vref+ = Vdd, Vref- = Vss
+blink_loop:
+    ; Toggle RD4 LED
+    btg     LATD, 4, A
 
-    ; ADCON2: right-justified, ACQT & ADCS set
-    movlw   0xBE        ; ADFM=1, ACQT=111, ADCS=110 (Fosc/64)
-    movwf   ADCON1, A
+    ;------------------------------------------------
+    ; Crude software delay
+    ;------------------------------------------------
+    movlw   0xFF
+    movwf   delay1, A
+delay_loop1:
+    movlw   0xFF
+    movwf   delay2, A
+delay_loop2:
+    decfsz  delay2, F, A
+    bra     delay_loop2
+    decfsz  delay1, F, A
+    bra     delay_loop1
 
-    ; ADCON0: select AN0, turn ADC on
-    movlw   0x1        ; CHS=0000 (AN0), ADON=1
-    movwf   ADCON0, A
+    bra     blink_loop       ; repeat forever
 
-main_loop:
-    ; Small acquisition delay
-    nop
-    nop
 
-    ; Start conversion (set GO/DONE)
-    bsf     ADCON0, 1, A
-
-wait_conv:
-    btfsc   ADCON0, 1, A      ; wait while GO/DONE = 1
-    bra     wait_conv
-
-    ;-----------------------------
-    ; Threshold test on ADRESH
-    ;-----------------------------
-    movlw   0x20              ; threshold
-
-    cpfslt  ADRESH, A         ; skip next if ADRESH < 0x20
-    bra     above_thresh      ; executes only if ADRESH >= 0x20
-
-    ; below threshold
-    bcf     LATB, 0, A        ; LED off
-    bra     main_loop
-
-above_thresh:
-    bsf     LATB, 0, A        ; LED on
-    bra     main_loop
+;------------------------------------------------
+; RAM variables (in access bank)
+;------------------------------------------------
+    PSECT   udata_acs
+delay1:
+    ds 1
+delay2:
+    ds 1
 
     END     reset_vector
