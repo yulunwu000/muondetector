@@ -19,7 +19,7 @@ The firmware reads out analogue pulses produced by a **SiPM** when a cosmic muon
 
 ## 🧱 Hardware Overview
 
-### ✨ Detector Components
+### Detector Components
 - **Scintillator:** ~5×5×1 cm plastic scintillator  
 - **Photon sensor:** SensL Micro-C series SiPM (6×6 mm active area)  
 - **Signal path:**  
@@ -30,7 +30,7 @@ The firmware reads out analogue pulses produced by a **SiPM** when a cosmic muon
   - Output pulse widths ≈ 0.5 ms  
 - These stages are documented in the manual diagrams.
 
-### 🖥️ Microcontroller Board
+### Microcontroller Board
 - **MikroElektronika Clicker 2 for PIC18FJ**
 - **MCU: PIC18F87J50**
   - 12-bit ADC  
@@ -38,7 +38,7 @@ The firmware reads out analogue pulses produced by a **SiPM** when a cosmic muon
   - Plenty of RAM/Flash for data buffering  
 - Firmware written in **PIC18 assembly** using MPLAB X.
 
-## 🔧 Firmware Features
+## Firmware Features
 
 - **ADC acquisition** of the shaped SiPM peak signal  
 - **Threshold detection** to identify real muon events  
