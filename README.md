@@ -38,7 +38,7 @@ The firmware reads out analogue pulses produced by a **SiPM** when a cosmic muon
   - Plenty of RAM/Flash for data buffering  
 - Firmware written in **PIC18 assembly** using MPLAB X.
 
-## Firmware Features
+## 🖥️ Firmware Features
 
 - **ADC acquisition** of the shaped SiPM peak signal  
 - **Threshold detection** to identify real muon events  
