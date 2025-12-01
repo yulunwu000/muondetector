@@ -44,13 +44,20 @@
     CONFIG  MSSPMSK = 1
     CONFIG  PMPMX   = DEFAULT
 
-;--------------------------------------
+;------------------------------------------------
 ; Reset vector
-;--------------------------------------
-    PSECT   resetVec, class=CODE, abs
-    ORG     0x0000
-reset_vector:
-    goto    start    ; on reset, CPU starts at 0x0000 and goes to start
+;------------------------------------------------
+PSECT resetVec, class=CODE, abs
+ORG 0x0000
+    goto start
+
+
+;------------------------------------------------
+; Interrupt vector
+;------------------------------------------------
+PSECT intVec, class=CODE, abs
+ORG 0x0008
+    goto isr
 
 ;------------------------------------------------
 ; Main program
@@ -60,25 +67,63 @@ ORG 0x0100
 
 start:
     ;------------------------------------------------
-    ; Make everything digital
+    ; Disable all analog inputs: make ports digital
     ;------------------------------------------------
     movlw   0xFF
-    movwf   ANCON0, A      ; AN0?AN7 digital
-    movwf   ANCON1, A      ; AN8?AN12 digital
-
+    movwf   ANCON0, A      ; AN0?AN7 all digital
+    movwf   ANCON1, A      ; AN8?AN12 all digital
+ 
     ; LED on RD4
-    clrf    TRISD, A       ; all PORTD outputs
-    bcf     LATD, 4, A     ; LED off
+    clrf TRISD, A
+    bcf  LATD, 4, A
 
-    ; RB2 as input
-    bsf     TRISB, 2, A    ; RB2 input (INT pin on mikroBUS 2)
+    ; ==== Configure RB2 as input ====
+    bsf TRISB, 2, A        ; RB2 = input
 
+    ; ==== Configure INT2 (RB2) ====
+    bsf INTCON2, 4, A      ; INTEDG2=1 ? interrupt on rising edge !!!IMPORTANT-- DOES COMPARATOR OUTPUT RISING OR FALLING EDGE? !!!
+    bcf INTCON3, 1, A      ; INT2IF = 0 (clear any pending flag)
+    bsf INTCON3, 4, A      ; enable INT2 external interrupt
+    bsf INTCON, 7, A       ; GIE = 1 (global interrupt enable)
 main_loop:
-    ; read RB2 and mirror it to LED
+    bra     main_loop          ; do nothing, wait for interrupts
 
-    bcf     LATD, 4, A     ; default LED off
+;------------------------------------------------
+; Interrupt Service Routine
+;------------------------------------------------
+isr:
+    ; Make sure it's really INT2
+    btfss   INTCON3, 1, A      ; INT2IF set?
+    retfie
 
-    btfsc   PORTB, 2, A    ; if RB2 is HIGH, skip next
-    bsf     LATD, 4, A     ; turn LED on when RB2=1
+    bcf     INTCON3, 1, A      ; clear INT2IF
 
-    bra     main_loop
+    ; Turn LED on
+    bsf     LATD, 4, A
+
+    ; ----- visible delay -----
+    movlw   0x20
+    movwf   delay1, A
+delay1_loop:
+    movlw   0xFF
+    movwf   delay2, A
+delay2_loop:
+    decfsz  delay2, F, A
+    bra     delay2_loop
+    decfsz  delay1, F, A
+    bra     delay1_loop
+    ; -------------------------
+
+    ; Turn LED off
+    bcf     LATD, 4, A
+    retfie
+
+;------------------------------------------------
+; RAM variables (in access bank)
+;------------------------------------------------
+    PSECT   udata_acs          ; access RAM section
+
+delay1:     ds  1              ; reserve 1 byte for delay1
+delay2:     ds  1              ; reserve 1 byte for delay2
+    
+    END
