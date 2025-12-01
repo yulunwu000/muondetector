@@ -56,86 +56,24 @@ reset_vector:
 ; Main code
 ;--------------------------------------
     PSECT   code, class=CODE
-    ORG     0x0100   ; places main code at memory address 0x0100
+    ORG     0x0100
 
 start:
-    ;------------------------------------------------
-    ; PORT setup
-    ;------------------------------------------------
-    bsf     TRISA, 0, A        ; configure RA0 (AN0) as input for ADC
-    clrf    TRISD, A           ; all PORTD as outputs
-    bcf     LATD, 4, A         ; LD1 (RD4) off initially
-
-    ;------------------------------------------------
-    ; Make RA0 analog, others digital
-    ; bit = 0 to analog, 1 to digital
-    ;------------------------------------------------
-    movlw   0xFE               ; 1111 1110b: AN0 analog, AN1?AN7 digital since bit0=0, bits1-7=1
+    ; Make all analog off
+    movlw   0xFF
     movwf   ANCON0, A
-    movlw   0xFF               ; AN8?AN12 all digital
     movwf   ANCON1, A
 
-    ;-----------------------------
-    ; ADC setup for PIC18F87J50
-    ;-----------------------------
-    ; ADCON0: select AN0, Vref = Vdd/Vss, ADC on
-    movlw   0x01     ; VCFG1:VCFG0 = 00, CHS3:0 = 0000 (AN0), ADON = 1
-    movwf   ADCON0, A
+    ; LED on RD4 as output
+    clrf    TRISD, A
+    bcf     LATD, 4, A
 
-    ; ADCON1: ADFM=1 (right justify),
-    ;         ACQT2:0 = 111  (20 Tad),
-    ;         ADCS2:0 = 110  (Fosc/64)
-    movlw   0xBE       ; ADFM=1, ADCAL=0, ACQT=111, ADCS=110
-    movwf   ADCON1, A
-  
+    ; RB2 input
+    bsf     TRISB, 2, A
+
 main_loop:
-    ;------------------------------------------------
-    ; Start conversion on AN0
-    ;------------------------------------------------
-    bsf     ADCON0, 1, A       ; GO/DONE = 1
+    bcf     LATD, 4, A      ; LED off by default
+    btfsc   PORTB, 2, A     ; if RB2 HIGH, skip next
+    bsf     LATD, 4, A      ; LED on
 
-wait_conv:
-    btfsc   ADCON0, 1, A       ; wait while GO/DONE = 1
-    bra     wait_conv
-
-    ;------------------------------------------------
-    ; Compare ADRESH with threshold
-    ;------------------------------------------------
-    movlw   0x10               ; adjust threshold as needed
-    subwf   ADRESH, W, A       ; W = ADRESH minus 0x20
-
-    btfss   STATUS, 0, A       ; C=1 if ADRESH <= 0x20
-    bra     below_thresh       ; if C=0, below threshold
-
-; === pulse detected ===
-pulse_detected:
-    bsf     LATD, 4, A         ; turn LD1 on
-
-    ; short visible delay so you can see the blink
-    movlw   0x20
-    movwf   delay1, A
-delay1_loop:
-    movlw   0xFF
-    movwf   delay2, A
-delay2_loop:
-    decfsz  delay2, F, A
-    bra     delay2_loop
-    decfsz  delay1, F, A
-    bra     delay1_loop
-
-    bcf     LATD, 4, A         ; LED off again
-    bra     main_loop
-
-below_thresh:
-    bcf     LATD, 4, A         ; make sure LED is off
-    bra     main_loop
-
-
-;------------------------------------------------
-; RAM variables (in access bank)
-;------------------------------------------------
-    PSECT   udata_acs
-delay1:     ds  1
-delay2:     ds  1
-
-    END     reset_vector
+    bra main_loop
