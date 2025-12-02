@@ -43,6 +43,11 @@
     CONFIG  ECCPMX  = DEFAULT
     CONFIG  MSSPMSK = 1
     CONFIG  PMPMX   = DEFAULT
+    
+;==== Constants (thresholds in ADRESH units) ==============================
+
+SIGNAL_HI   EQU 0x0D      ; ? 50 counts (from Arduino SIGNAL_THRESHOLD)
+RESET_HI    EQU 0x07      ; ? 25 counts (from Arduino RESET_THRESHOLD)
 
 ;--------------------------------------
 ; Reset vector
@@ -87,32 +92,30 @@ start:
     ;         ADCS2:0 = 110  (Fosc/64)
     movlw   0xBE       ; ADFM=1, ADCAL=0, ACQT=111, ADCS=110
     movwf   ADCON1, A
-  
+
 main_loop:
-    ;------------------------------------------------
-    ; Start conversion on AN0
-    ;------------------------------------------------
+    ;===== 1) Wait for pulse above SIGNAL_HI =============================
+
+wait_for_pulse:
+    ; start conversion
     bsf     ADCON0, 1, A       ; GO/DONE = 1
-
-wait_conv:
+adc_wait1:
     btfsc   ADCON0, 1, A       ; wait while GO/DONE = 1
-    bra     wait_conv
+    bra     adc_wait1
 
-    ;------------------------------------------------
-    ; Compare ADRESH with threshold
-    ;------------------------------------------------
-    movlw   0x10               ; adjust threshold as needed
-    subwf   ADRESH, W, A       ; W = ADRESH minus 0x20
+    ; ADRESH now holds the high 8 bits of the 10-bit result
+    movlw   SIGNAL_HI
+    subwf   ADRESH, W, A       ; W = ADRESH - SIGNAL_HI
 
-    btfss   STATUS, 0, A       ; C=1 if ADRESH <= 0x20
-    bra     below_thresh       ; if C=0, below threshold
+    btfss   STATUS, 0, A       ; C=1 if ADRESH >= SIGNAL_HI
+    bra     wait_for_pulse     ; if below threshold, keep waiting
 
-; === pulse detected ===
-pulse_detected:
-    bsf     LATD, 4, A         ; turn LD1 on
+    ;===== Pulse detected! Flash LED =====================================
 
-    ; short visible delay so you can see the blink
-    movlw   0x20
+    bsf     LATD, 4, A         ; LED ON
+
+    ; crude visible delay (~ few ms)
+    movlw   0x40
     movwf   delay1, A
 delay1_loop:
     movlw   0xFF
@@ -123,14 +126,24 @@ delay2_loop:
     decfsz  delay1, F, A
     bra     delay1_loop
 
-    bcf     LATD, 4, A         ; LED off again
+    bcf     LATD, 4, A         ; LED OFF
+
+    ;===== 2) Deadtime: wait until signal < RESET_HI =====================
+
+wait_reset:
+    bsf     ADCON0, 1, A       ; new conversion
+adc_wait2:
+    btfsc   ADCON0, 1, A
+    bra     adc_wait2
+
+    movlw   RESET_HI
+    subwf   ADRESH, W, A       ; W = ADRESH - RESET_HI
+
+    btfsc   STATUS, 0, A       ; C=1 -> ADRESH >= RESET_HI
+    bra     wait_reset         ; still above reset threshold, keep waiting
+
+    ; back to waiting for next pulse
     bra     main_loop
-
-below_thresh:
-    bcf     LATD, 4, A         ; make sure LED is off
-    bra     main_loop
-
-
 ;------------------------------------------------
 ; RAM variables (in access bank)
 ;------------------------------------------------
