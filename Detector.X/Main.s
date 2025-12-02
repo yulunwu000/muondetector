@@ -67,7 +67,7 @@ start:
     ;------------------------------------------------
     ; PORT setup
     ;------------------------------------------------
-    bsf     TRISA, 0, A        ; configure RA0 (AN0) as input for ADC
+    bsf TRISA, 2, A            ; RA2 input
     clrf    TRISD, A           ; all PORTD as outputs
     bcf     LATD, 4, A         ; LD1 (RD4) off initially
 
@@ -75,7 +75,7 @@ start:
     ; Make RA0 analog, others digital
     ; bit = 0 to analog, 1 to digital
     ;------------------------------------------------
-    movlw   0xFE               ; 1111 1110b: AN0 analog, AN1?AN7 digital since bit0=0, bits1-7=1
+    movlw   0xFE               ; 1111 1110b: AN0 analog, AN1-AN7 digital since bit0=0, bits1-7=1
     movwf   ANCON0, A
     movlw   0xFF               ; AN8?AN12 all digital
     movwf   ANCON1, A
@@ -84,8 +84,8 @@ start:
     ; ADC setup for PIC18F87J50
     ;-----------------------------
     ; ADCON0: select AN0, Vref = Vdd/Vss, ADC on
-    movlw   0x01     ; VCFG1:VCFG0 = 00, CHS3:0 = 0000 (AN0), ADON = 1
-    movwf   ADCON0, A
+    movlw 0xFB      ; AN2 analog (bit2=0), others digital
+    movwf ANCON0, A
 
     ; ADCON1: ADFM=1 (right justify),
     ;         ACQT2:0 = 111  (20 Tad),
