@@ -64,92 +64,42 @@ reset_vector:
     ORG     0x0100   ; places main code at memory address 0x0100
 
 start:
-    ;------------------------------------------------
-    ; PORT setup
-    ;------------------------------------------------
-    bsf	    TRISA, 2, A            ; RA2 input
-    clrf    TRISD, A           ; all PORTD as outputs
-    bsf	    RD1
-    bcf     LATD, 4, A         ; LD1 (RD4) off initially
-
-    ;------------------------------------------------
-    ; Make RA0 analog, others digital
-    ; bit = 0 to analog, 1 to digital
-    ;------------------------------------------------
-    movlw   0xFB		       ; AN2 analog
-    movwf   ANCON0, A
-    movlw   0x05             ; ADC on, CHS = AN2
-    movwf   ANCON0, A
-
     ;-----------------------------
-    ; ADC setup for PIC18F87J50
+    ; SPI init for microSD (MSSP1)
+    ; Socket 1: SCK=RC3, SDO=RC5, SDI=RC4, CS=RD3
     ;-----------------------------
-    ; ADCON0: select AN0, Vref = Vdd/Vss, ADC on
-    movlw 0xFB      ; AN2 analog (bit2=0), others digital
-    movwf ANCON0, A
 
-    ; ADCON1: ADFM=1 (right justify),
-    ;         ACQT2:0 = 111  (20 Tad),
-    ;         ADCS2:0 = 110  (Fosc/64)
-    movlw   0xBE       ; ADFM=1, ADCAL=0, ACQT=111, ADCS=110
-    movwf   ADCON1, A
+    ; Pin directions
+    bcf     TRISC, 3, A        ; RC3/SCK  as output
+    bcf     TRISC, 5, A        ; RC5/SDO  as output
+    bsf     TRISC, 4, A        ; RC4/SDI  as input
 
-main_loop:
-    ;===== 1) Wait for pulse above SIGNAL_HI =============================
+    bcf     TRISD, 3, A        ; RD3/CS as output
+    bsf     LATD, 3, A         ; CS high (deselected)
 
-wait_for_pulse:
-    ; start conversion
-    bsf     ADCON0, 1, A       ; GO/DONE = 1
-adc_wait1:
-    btfsc   ADCON0, 1, A       ; wait while GO/DONE = 1
-    bra     adc_wait1
+    ; SPI mode 0, master, Fosc/64
+    movlw   0x40               ; SSPSTAT: SMP=0, CKE=1 (data valid on rising edge)
+    movwf   SSP1STAT, A
 
-    ; ADRESH now holds the high 8 bits of the 10-bit result
-    movlw   SIGNAL_HI
-    subwf   ADRESH, W, A       ; W = ADRESH - SIGNAL_HI
+    movlw   0x22        ; SSPCON1:
+                               ;   SSPEN=1 (bit5) enable SPI
+                               ;   CKP=0
+                               ;   SSPM3:0=0010 -> Fosc/64
+    movwf   SSP1CON1, A
 
-    btfss   STATUS, 0, A       ; C=1 if ADRESH >= SIGNAL_HI
-    bra     wait_for_pulse     ; if below threshold, keep waiting
+    bcf     PIR1, 3, A         ; clear SSPIF
 
-    ;===== Pulse detected! Flash LED =====================================
-
-    bsf     LATD, 4, A         ; LED ON
-
-    ; crude visible delay (~ few ms)
-    movlw   0x40
-    movwf   delay1, A
-delay1_loop:
-    movlw   0xFF
-    movwf   delay2, A
-delay2_loop:
-    decfsz  delay2, F, A
-    bra     delay2_loop
-    decfsz  delay1, F, A
-    bra     delay1_loop
-
-    bcf     LATD, 4, A         ; LED OFF
-
-    ;===== 2) Deadtime: wait until signal < RESET_HI =====================
-
-wait_reset:
-    bsf     ADCON0, 1, A       ; new conversion
-adc_wait2:
-    btfsc   ADCON0, 1, A
-    bra     adc_wait2
-
-    movlw   RESET_HI
-    subwf   ADRESH, W, A       ; W = ADRESH - RESET_HI
-
-    btfsc   STATUS, 0, A       ; C=1 -> ADRESH >= RESET_HI
-    bra     wait_reset         ; still above reset threshold, keep waiting
-
-    ; back to waiting for next pulse
-    bra     main_loop
-;------------------------------------------------
-; RAM variables (in access bank)
-;------------------------------------------------
-    PSECT   udata_acs
-delay1:     ds  1
-delay2:     ds  1
-
-    END     reset_vector
+    ;------------------------------------------------
+    ; spi_xfer: full-duplex SPI byte transfer
+    ;   Input:  W  = byte to send
+    ;   Output: W  = byte received
+    ;   Clobbers: SSPBUF, STATUS bits, etc.
+    ;------------------------------------------------
+    spi_xfer:
+	movwf   SSP1BUF, A          ; start transfer
+    spi_wait:
+	btfss   PIR1, 3, A         ; SSPIF set when done?
+	bra     spi_wait
+	bcf     PIR1, 3, A
+	movf    SSP1BUF, W, A       ; read received byte
+	return
