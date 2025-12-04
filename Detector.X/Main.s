@@ -69,6 +69,7 @@ start:
     ;------------------------------------------------
     bsf	    TRISA, 2, A            ; RA2 input
     clrf    TRISD, A           ; all PORTD as outputs
+    bsf	    RD1
     bcf     LATD, 4, A         ; LD1 (RD4) off initially
 
     ;------------------------------------------------
