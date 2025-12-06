@@ -1,2 +1,5 @@
-Makefile linguist-vendored
-Makefile linguist-vendored
+**/Makefile linguist-vendored
+*.asm linguist-language=Assembly
+*.inc linguist-language=Assembly
+*.S   linguist-language=Assembly
+*.s   linguist-language=Assembly
