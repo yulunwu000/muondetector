@@ -84,20 +84,20 @@ start:
     ;-----------------------------
     call    spi_init
     call    sd_init
-
+ 
     ;-----------------------------
     ; Check sd_r1 (R1 response to CMD0)
     ;   Expected: 0x01 (idle state)
     ;-----------------------------
     movf    sd_r1, W, A        ; W = sd_r1
-    xorlw   0xFF               ; compare with 0x01
+    xorlw   0xFF               ; compare with 0xFF
     btfsc   STATUS, 2, A       ; Z = 1 if sd_r1 == 0xFF
-    bra     sd_fail              ; if no response, fast blink
+    bra     sd_fail            ; if no response, fast blink
 
     movf    sd_r1, W, A
-    xorlw   0x01
+    xorlw   0x00
     btfsc   STATUS, 2, A
-    bra     sd_ok              ; OK path
+    bra     sd_ok              ; OK path (slow blink)
     
     bra     sd_fail_other
 
@@ -120,11 +120,11 @@ spi_init:
     bcf     TRISD, 3, A        ; RD3/CS   output
     SD_CS_HIGH                 ; CS high (deselect card)
 
-    ; SPI mode 0, master, Fosc/64
-    movlw   0x40               ; SSPSTAT: SMP=0, CKE=1
+    ; SPI mode , master, Fosc/64
+    movlw   0x40      
     movwf   SSP1STAT, A
 
-    movlw   0x22               ; SSPCON1: SSPEN=1, CKP=0, Fosc/64
+    movlw   0x22
     movwf   SSP1CON1, A
 
     bcf     PIR1, 3, A         ; clear SSPIF
@@ -160,65 +160,228 @@ clk80_loop:
     return
     
 ;------------------------------------------------
-; sd_send_cmd0: send CMD0 (GO_IDLE_STATE)
-;  - arg = 0x00000000
-;  - CRC = 0x95 (required for CMD0)
+; sd_send_cmd
+;   Input:
+;       W      = command index (e.g. 0, 8, 55, 41, 58)
+;       sd_arg3..sd_arg0 = 32-bit argument (MSB..LSB)
+;       sd_crc = CRC (only really needed for CMD0 & CMD8)
+;   Output:
+;       sd_r1  = R1 response
+;   Uses:
+;       sd_retry, sd_tmp, W
+;   Note:
+;       Assumes CS is already LOW (SD_CS_LOW done by caller)
 ;------------------------------------------------
-sd_send_cmd0:
-    movlw   0x40            ; 0x40 | 0 (CMD0)
+sd_send_cmd:
+    ; save command index from W
+    movwf   sd_tmp, A          ; sd_tmp = cmd index
+    ; 1 dummy byte before command
+    movlw   0xFF
     call    spi_xfer
-    movlw   0x00            ; arg[31:24]
+
+    ; send command byte: 0x40 | cmd
+    movf    sd_tmp, W, A       ; restore cmd index
+    iorlw   0x40        ; W = cmd | 0x40
     call    spi_xfer
-    movlw   0x00            ; arg[23:16]
+
+    ; send 4 arg bytes (MSB first)
+    movf    sd_arg3, W, A
     call    spi_xfer
-    movlw   0x00            ; arg[15:8]
+    movf    sd_arg2, W, A
     call    spi_xfer
-    movlw   0x00            ; arg[7:0]
+    movf    sd_arg1, W, A
     call    spi_xfer
-    movlw   0x95            ; CRC for CMD0 (with end bit)
+    movf    sd_arg0, W, A
     call    spi_xfer
+
+    ; send CRC
+    movf    sd_crc, W, A
+    call    spi_xfer
+
+    ; now wait for R1 (non-0xFF) up to 8 bytes
+    movlw   0x20
+    movwf   sd_retry, A
+
+sd_cmd_resp_loop:
+    movlw   0xFF
+    call    spi_xfer
+    movwf   sd_r1, A           ; sd_r1 = response
+
+    movf    sd_r1, W, A
+    xorlw   0xFF
+    btfsc   STATUS, 2, A       ; Z=1 if sd_r1 == 0xFF
+    bra     sd_cmd_resp_next   ; still waiting
+
+    return                     ; got a valid R1
+
+sd_cmd_resp_next:
+    decfsz  sd_retry, F, A
+    bra     sd_cmd_resp_loop
+
+    ; timeout, sd_r1 is still 0xFF
     return
 
 ;------------------------------------------------
-; sd_init: basic SD card init
-; 1) 80 clocks with CS high
-; 2) CMD0, read R1 response into sd_r1
+; sd_init: SD/SDHC/SDXC init in SPI mode
+;  1) 80 clocks with CS high
+;  2) CMD0  (GO_IDLE_STATE) loop until R1=0x01
+;  3) CMD8  (SEND_IF_COND)   for SDHC/SDXC
+;  4) ACMD41 (CMD55 + CMD41 with HCS) until R1=0x00
+;  5) CMD58 (READ_OCR) to clear OCR and confirm ready
+;  Result:
+;      sd_r1 = last R1 (should be 0x00 on success)
 ;------------------------------------------------
 sd_init:
-    ; 1) Power-up clocks
+    ; 1) Power-up clocks (80 clocks, CS high)
+    ; call    delay_ms
     call    sd_clock_80
 
-    ; 2) Select card
-    SD_CS_LOW
-    ; clock one more dummy byte before CMD0
-    movlw   0xFF
-    call    spi_xfer
-
-    ; 3) Send CMD0
-    call    sd_send_cmd0
-
-    ; 4) Read R1 response (up to 8 bytes)
-    movlw   0x08
+    ; --- CMD0 loop: go idle ---
+    movlw   0x32                ; up to 50 tries
     movwf   sd_retry, A
 
-sd_wait_r1:
-    movlw   0xFF
-    call    spi_xfer        ; clock in response
-    movwf   sd_r1, A
+sd_init_cmd0_loop:
+    SD_CS_LOW
 
-    ; If response != 0xFF, break
+    ; arg = 0x00000000
+    clrf    sd_arg3, A
+    clrf    sd_arg2, A
+    clrf    sd_arg1, A
+    clrf    sd_arg0, A
+
+    ; CRC for CMD0 is 0x95 (with end bit)
+    movlw   0x95
+    movwf   sd_crc, A
+
+    movlw   0x00                ; CMD0 index
+    call    sd_send_cmd         ; result in sd_r1
+
+    SD_CS_HIGH
+
+    ; check for R1 = 0x01 (in idle state)
     movf    sd_r1, W, A
-    xorlw   0xFF
-    btfss   STATUS, 2, A
-    bra     sd_got_r1
+    xorlw   0x01
+    btfsc   STATUS, 2, A
+    bra     sd_after_cmd0       ; success
 
-    ; still 0xFF, retry until sd_retry==0
+    ; else try again until sd_retry==0
     decfsz  sd_retry, F, A
-    bra     sd_wait_r1
+    bra     sd_init_cmd0_loop
 
-    ; Out of retries, fall through with sd_r1 still 0xFF
-sd_got_r1:
-    SD_CS_HIGH             ; deselect card again
+    ; CMD0 failed: leave sd_r1 as last response (likely 0xFF)
+    return
+
+sd_after_cmd0:
+    ; --- CMD8: SEND_IF_COND (for SDHC/SDXC) ---
+    SD_CS_LOW
+
+    ; arg = 0x000001AA (2.7?3.6V, check pattern 0xAA)
+    clrf    sd_arg3, A          ; 0x00
+    clrf    sd_arg2, A          ; 0x00
+    movlw   0x01
+    movwf   sd_arg1, A
+    movlw   0xAA
+    movwf   sd_arg0, A
+
+    ; CRC for CMD8 is 0x87
+    movlw   0x87
+    movwf   sd_crc, A
+
+    movlw   0x08                ; CMD8 index
+    call    sd_send_cmd         ; R1 in sd_r1
+
+    ; read the rest of R7 (4 bytes) and ignore
+    movlw   0x04
+    movwf   sd_tmp, A
+sd_read_r7:
+    movlw   0xFF
+    call    spi_xfer
+    decfsz  sd_tmp, F, A
+    bra     sd_read_r7
+
+    SD_CS_HIGH
+
+    ; If bit2 (illegal command) set, it's old SD <2GB.
+    ; For SDXC it should NOT be set, but we won?t special-case it here.
+
+    ; --- ACMD41 loop: initialise (HCS set) ---
+    movlw   0xFF                ; many tries
+    movwf   sd_retry, A
+
+sd_acmd41_loop:
+    ; CMD55: APP_CMD
+    SD_CS_LOW
+
+    clrf    sd_arg3, A
+    clrf    sd_arg2, A
+    clrf    sd_arg1, A
+    clrf    sd_arg0, A
+
+    movlw   0xFF                ; dummy CRC (CRC off after CMD0/CMD8)
+    movwf   sd_crc, A
+
+    movlw   55                  ; CMD55 index
+    call    sd_send_cmd         ; R1 in sd_r1
+
+    SD_CS_HIGH
+
+    ; CMD41: SD_SEND_OP_COND with HCS (bit30=1)
+    SD_CS_LOW
+
+    movlw   0x40                ; 0x40000000 (HCS)
+    movwf   sd_arg3, A
+    clrf    sd_arg2, A
+    clrf    sd_arg1, A
+    clrf    sd_arg0, A
+
+    movlw   0xFF
+    movwf   sd_crc, A
+
+    movlw   41                  ; CMD41 index
+    call    sd_send_cmd         ; R1 in sd_r1
+
+    SD_CS_HIGH
+
+    ; check if card is ready: R1 == 0x00
+    movf    sd_r1, W, A
+    xorlw   0x00
+    btfsc   STATUS, 2, A
+    bra     sd_acmd41_done      ; ready!
+
+    ; else try again until retry == 0
+    decfsz  sd_retry, F, A
+    bra     sd_acmd41_loop
+
+    ; ACMD41 timed out; sd_r1 holds last code
+    return
+
+sd_acmd41_done:
+    ; --- CMD58: READ_OCR ---
+    SD_CS_LOW
+
+    clrf    sd_arg3, A
+    clrf    sd_arg2, A
+    clrf    sd_arg1, A
+    clrf    sd_arg0, A
+
+    movlw   0xFF
+    movwf   sd_crc, A
+
+    movlw   58                  ; CMD58 index
+    call    sd_send_cmd         ; R1 in sd_r1 (should be 0x00)
+
+    ; read OCR (4 bytes) and ignore or store if you like
+    movlw   0x04
+    movwf   sd_tmp, A
+sd_read_ocr:
+    movlw   0xFF
+    call    spi_xfer
+    decfsz  sd_tmp, F, A
+    bra     sd_read_ocr
+
+    SD_CS_HIGH
+
+    ; If we got here, sd_r1 should be 0x00 (card ready)
     return
 
 ;------------------------------------------------
@@ -286,7 +449,7 @@ sd_fail_other_blink_loop:
 ; delay_ms: crude longer delay
 ;------------------------------------------------
 delay_ms:
-    movlw   0x40
+    movlw   0xFF
     movwf   delay1, A
 d1_loop:
     movlw   0xFF
@@ -302,7 +465,7 @@ d2_loop:
 ; delay_ms_short: crude shorter delay
 ;------------------------------------------------
 delay_ms_short:
-    movlw   0x10
+    movlw   0x04
     movwf   delay1, A
 d1s_loop:
     movlw   0xFF
@@ -322,5 +485,11 @@ sd_retry:   ds  1
 delay1:     ds  1
 delay2:     ds  1
 err_cnt:    ds  1
+
+sd_arg0:    ds  1     ; arg[7:0]
+sd_arg1:    ds  1     ; arg[15:8]
+sd_arg2:    ds  1     ; arg[23:16]
+sd_arg3:    ds  1     ; arg[31:24]
+sd_crc:     ds  1     ; CRC byte for command
 
     END     reset_vector
