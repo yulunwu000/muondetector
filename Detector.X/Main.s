@@ -46,8 +46,8 @@
     
 ;==== Constants (thresholds in ADRESH units) ==============================
 
-SIGNAL_HI   EQU 0x0D      ; ? 50 counts (from Arduino SIGNAL_THRESHOLD)
-RESET_HI    EQU 0x07      ; ? 25 counts (from Arduino RESET_THRESHOLD)
+SIGNAL_HI   EQU 0x0D      ; approx 50 counts (from Arduino SIGNAL_THRESHOLD)
+RESET_HI    EQU 0x07      ; approx 25 counts (from Arduino RESET_THRESHOLD)
 
 ;--------------------------------------
 ; Reset vector
@@ -69,24 +69,29 @@ start:
     ;------------------------------------------------
     bsf	    TRISA, 2, A            ; RA2 input
     clrf    TRISD, A           ; all PORTD as outputs
-    bsf	    RD1
+    bsf     TRISB, 2, A        ; RB2 as input (UVP / INT)
     bcf     LATD, 4, A         ; LD1 (RD4) off initially
 
     ;------------------------------------------------
-    ; Make RA0 analog, others digital
+    ; Make RA2 (AN2) analog, others digital
     ; bit = 0 to analog, 1 to digital
     ;------------------------------------------------
+    bsf     WDTCON, 4, A       ; ADSHR = 1 -> access ANCON0/ANCON
+    
     movlw   0xFB		       ; AN2 analog
     movwf   ANCON0, A
-    movlw   0x05             ; ADC on, CHS = AN2
-    movwf   ANCON0, A
+    
+    movlw   0xFF            ; all upper analog pins digital (AN8?AN12)
+    movwf   ANCON1, A
+    
+    bcf     WDTCON, 4, A       ; ADSHR = 0 -> back to ADCON0/ADCON1
 
     ;-----------------------------
     ; ADC setup for PIC18F87J50
     ;-----------------------------
-    ; ADCON0: select AN0, Vref = Vdd/Vss, ADC on
-    movlw 0xFB      ; AN2 analog (bit2=0), others digital
-    movwf ANCON0, A
+    ; ADCON0: select AN2, Vref = Vdd/Vss, ADC on
+    movlw 0x09      ; 0000 1001b
+    movwf ADCON0, A
 
     ; ADCON1: ADFM=1 (right justify),
     ;         ACQT2:0 = 111  (20 Tad),
