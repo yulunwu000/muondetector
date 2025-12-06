@@ -3,3 +3,8 @@
 *.inc linguist-language=Assembly
 *.S   linguist-language=Assembly
 *.s   linguist-language=Assembly
+Detector.X/nbproject/Makefile-default.mk linguist-vendored
+Detector.X/nbproject/Makefile-genesis.properties linguist-vendored
+Detector.X/nbproject/Makefile-impl.mk linguist-vendored
+Detector.X/nbproject/Makefile-local-default.mk linguist-vendored
+Detector.X/nbproject/Makefile-variables.mk linguist-vendored
