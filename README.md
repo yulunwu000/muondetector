@@ -20,7 +20,7 @@ The firmware reads out analogue pulses produced by a **SiPM** when a cosmic muon
 ## 🧱 Hardware Overview
 
 ### Detector Components
-- **Scintillator:** ~5×5×1 cm plastic scintillator  
+- **Scintillator:** stacked 5×5×1 cm plastic scintillator slabs
 - **Photon sensor:** SensL Micro-C series SiPM (6×6 mm active area)  
 - **Signal path:**  
   - SiPM bias at ~29.5 V  
