@@ -49,7 +49,7 @@ The firmware reads out analogue pulses produced by a **SiPM** when a cosmic muon
   - ADC configuration  
   - Timer interrupts  
   - GPIOs (LED indicators, trigger outputs)  
-  - Future SD-card or coincidence features
+  - SD-card and coincidence features
 
 ## 🛠️ Build Instructions
 
@@ -57,3 +57,9 @@ The firmware reads out analogue pulses produced by a **SiPM** when a cosmic muon
 - **MPLAB X IDE v6.25**
 - **XC8 assembler** (part of XC8 toolchain)
 - **PIC18F87J50** device support installed
+
+## AI Use Acknowledgement
+
+Parts of the debugging process (e.g., SPI timing issues, SD card initialisation sequencing on PIC18F87J50) were assisted by ChatGPT as an interactive troubleshooting tool.  
+All design decisions, code implementation, and verification were performed by me.
+
