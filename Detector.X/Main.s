@@ -55,8 +55,10 @@ ENDM
     
 ;==== Constants (thresholds in ADRESH units) ==============================
 
-SIGNAL_HI   EQU 0x0D      ; ? 50 counts (from Arduino SIGNAL_THRESHOLD)
-RESET_HI    EQU 0x07      ; ? 25 counts (from Arduino RESET_THRESHOLD)
+SIGNAL_HI	    EQU 0x0D      ; ? 50 counts (from Arduino SIGNAL_THRESHOLD)
+RESET_HI	    EQU 0x07      ; ? 25 counts (from Arduino RESET_THRESHOLD)
+LOG_REC_SIZE        EQU 8
+LOG_RECS_PER_SECTOR EQU (512 / LOG_REC_SIZE)    ; = 64
 
 ;--------------------------------------
 ; Reset vector
@@ -71,6 +73,27 @@ reset_vector:
 ;--------------------------------------
     PSECT   code, class=CODE
     ORG     0x0100   ; places main code at memory address 0x0100
+    
+;--------------------------------------
+; Buffer variables (access bank)
+;--------------------------------------
+    PSECT   udata_acs
+log_index:    ds  1         ; 0..64
+log_blk0:   ds 1   ; LSB
+log_blk1:   ds 1
+log_blk2:   ds 1
+log_blk3:   ds 1   ; MSB
+    
+;--------------------------------------
+; One-sector log buffer in BIGRAM
+;--------------------------------------
+    PSECT   log_buf_ram, class=BIGRAM, space=1, noexec
+log_buf:      ds  512       ; raw records, exactly one sector   
+    
+;--------------------------------------
+; Back to CODE
+;--------------------------------------
+    PSECT   code, class=CODE    
 
 start:
     ;-----------------------------
@@ -96,7 +119,8 @@ start:
 
     movf    sd_r1, W, A
     xorlw   0x00
-    btfsc   STATUS, 2, A  
+    btfss   STATUS, 2, A
+    bra     sd_fail_other   ; some R1 error code
     
     ; init done, sd_r1 == 0x00 at this point
     ; --- test write ---
@@ -105,25 +129,87 @@ start:
     movf    sd_r1, W, A
     xorlw   0x00
     btfss   STATUS, 2, A
-    bra     sd_fail_other      ; write error (encode sd_r1)
+    bra     sd_fail_other      ; verify error (encode sd_r1)
 
-    ; --- test read + verify ---
-    call    sd_test_verify
+    ; initialise logging state. start at some safe LBA, e.g. 0x00001010
+    clrf    log_blk3, A
+    clrf    log_blk2, A
+    movlw   0x10
+    movwf   log_blk1, A
+    movlw   0x10
+    movwf   log_blk0, A
 
-    movf    sd_r1, W, A
-    xorlw   0x00
-    btfsc   STATUS, 2, A
-    bra     sd_ok              ; init + write + verify all OK ? slow blink
+    clrf    log_index, A
 
+    bra     main_loop
+    
     ; anything else = read/verify error
     bra     sd_fail_other
 
 
-    ;-----------------------------
-    ; main muon loop here
-    ;-----------------------------
-main_loop:
-    bra     main_loop          ; placeholder
+;-----------------------------
+; main muon loop here
+;-----------------------------
+    main_loop:
+	; check if buffer full (64 records)
+	movf    log_index, W, A
+	xorlw   LOG_RECS_PER_SECTOR
+	btfss   STATUS, 2, A
+	bra     main_loop          ; not full yet ? spin (for now)
+
+	; --- copy 512 bytes from log_buf -> sd_buf ---
+	lfsr    0, log_buf
+	lfsr    1, sd_buf
+
+	movlw   low 512            ; 0x00
+	movwf   sd_cntL, A
+	movlw   high 512           ; 0x02
+	movwf   sd_cntH, A
+
+    copy_loop:
+	movf    POSTINC0, W, A
+	movwf   POSTINC1, A
+
+	decfsz  sd_cntL, F, A
+	bra     copy_loop
+	decfsz  sd_cntH, F, A
+	bra     copy_loop
+
+	; --- set sd_arg3..0 from log_blk3..0 ---
+	movf    log_blk3, W, A
+	movwf   sd_arg3, A
+	movf    log_blk2, W, A
+	movwf   sd_arg2, A
+	movf    log_blk1, W, A
+	movwf   sd_arg1, A
+	movf    log_blk0, W, A
+	movwf   sd_arg0, A
+
+	; --- write block ---
+	call    sd_write_block
+
+	movf    sd_r1, W, A
+	xorlw   0x00
+	btfss   STATUS, 2, A
+	bra     main_write_error
+
+	; on success: increment block number
+	incf    log_blk0, F, A
+	btfsc   STATUS, 0, A
+	incf    log_blk1, F, A
+	btfsc   STATUS, 0, A
+	incf    log_blk2, F, A
+	btfsc   STATUS, 0, A
+	incf    log_blk3, F, A
+
+	; clear log_index so ISR can refill from start
+	clrf    log_index, A
+
+	bra     main_loop
+
+    main_write_error:
+	; for now just go to error blink
+	bra     sd_fail_other
 
     ;-----------------------------
     ; SPI init for microSD (MSSP1)
@@ -788,7 +874,7 @@ sd_ver_fail:
 ; delay_ms: crude longer delay
 ;------------------------------------------------
 delay_ms:
-    movlw   0x10
+    movlw   0x05
     movwf   delay1, A      ; outer loop
 delay_outer:
     movlw   0xFF
@@ -812,7 +898,7 @@ delay_inner:
 ; delay_ms_short: crude shorter delay
 ;------------------------------------------------
 delay_ms_short:
-    movlw   0x04
+    movlw   0x08
     movwf   delay1, A
 d1s_loop:
     movlw   0xFF
