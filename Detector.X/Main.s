@@ -96,10 +96,28 @@ start:
 
     movf    sd_r1, W, A
     xorlw   0x00
-    btfsc   STATUS, 2, A
-    bra     sd_ok              ; OK path (slow blink)
+    btfsc   STATUS, 2, A  
     
+    ; init done, sd_r1 == 0x00 at this point
+    ; --- test write ---
+    call    sd_test_write
+
+    movf    sd_r1, W, A
+    xorlw   0x00
+    btfss   STATUS, 2, A
+    bra     sd_fail_other      ; write error (encode sd_r1)
+
+    ; --- test read + verify ---
+    call    sd_test_verify
+
+    movf    sd_r1, W, A
+    xorlw   0x00
+    btfsc   STATUS, 2, A
+    bra     sd_ok              ; init + write + verify all OK ? slow blink
+
+    ; anything else = read/verify error
     bra     sd_fail_other
+
 
     ;-----------------------------
     ; main muon loop here
@@ -575,19 +593,219 @@ sd_write_block_fail:
     return
 
 ;------------------------------------------------
+; sd_test_write:
+;   Fill sd_buf with pattern and write 1 block.
+;   On return:
+;       sd_r1 = 0x00 if write succeeded
+;             = non-zero on error (from sd_write_block)
+;------------------------------------------------
+sd_test_write:
+    ; 1) Fill sd_buf[512] with 0xAA
+    lfsr    0, sd_buf
+
+    movlw   low 512            ; 512 = 0x0200
+    movwf   sd_cntL, A         ; = 0x00
+    movlw   high 512
+    movwf   sd_cntH, A         ; = 0x02
+
+sd_fill_loop:
+    movlw   0xAA               ; test pattern byte
+    movwf   POSTINC0, A        ; store and FSR0++
+
+    ; dec 16-bit counter
+    decfsz  sd_cntL, F, A
+    bra     sd_fill_loop
+    decfsz  sd_cntH, F, A
+    bra     sd_fill_loop
+    ; now sd_buf is full of 0xAA
+
+    ; 2) Choose a test block number (LBA) for SDHC/SDXC
+    ;    Example: LBA = 0x00001000
+    ;    arg = 0x00001000 ? [31:24]=0x00, [23:16]=0x00, [15:8]=0x10, [7:0]=0x00
+    clrf    sd_arg3, A         ; 0x00
+    clrf    sd_arg2, A         ; 0x00
+    movlw   0x10
+    movwf   sd_arg1, A
+    clrf    sd_arg0, A
+
+    ; 3) Call sd_write_block
+    call    sd_write_block     ; sd_r1 = 0x00 on success (per our implementation)
+
+    return
+
+;------------------------------------------------
+; sd_read_block:
+;   Read one 512-byte block into sd_buf.
+;   Input:
+;       sd_arg3..sd_arg0 = block number (SDHC/SDXC, LBA)
+;   Output:
+;       sd_r1 = 0x00 on success (CMD17 R1)
+;              non-zero on error
+;------------------------------------------------
+sd_read_block:
+    ; 1) Select card
+    SD_CS_LOW
+
+    ; 2) CRC can be dummy for CMD17 once CRC disabled
+    movlw   0xFF
+    movwf   sd_crc, A
+
+    ; 3) Send CMD17 (index 17)
+    movlw   17                  ; CMD17 index
+    call    sd_send_cmd         ; R1 -> sd_r1
+
+    ; 4) Check R1 (must be 0x00)
+    movf    sd_r1, W, A
+    xorlw   0x00
+    btfsc   STATUS, 2, A        ; Z=1 if R1 == 0
+    bra     sd_read_cmd_ok
+
+    ; command rejected or card not ready
+    bra     sd_read_block_fail
+
+sd_read_cmd_ok:
+    ; 5) Wait for data token 0xFE
+    movlw   0xFF
+    movwf   sd_retry, A         ; retry counter
+
+sd_wait_token:
+    movlw   0xFF
+    call    spi_xfer            ; read a byte
+    movwf   sd_tmp, A
+
+    movf    sd_tmp, W, A
+    xorlw   0xFE                ; token?
+    btfsc   STATUS, 2, A
+    bra     sd_got_token
+
+    ; not 0xFE; if 0xFF card may be busy; loop with timeout
+    decfsz  sd_retry, F, A
+    bra     sd_wait_token
+
+    ; token timeout
+    bra     sd_read_block_fail
+
+sd_got_token:
+    ; 6) Read 512 data bytes into sd_buf
+    lfsr    0, sd_buf
+
+    ; set 16-bit count = 512 (0x0200)
+    movlw   low 512            ; 0x00
+    movwf   sd_cntL, A
+    movlw   high 512           ; 0x02
+    movwf   sd_cntH, A
+
+sd_rd_loop:
+    movlw   0xFF
+    call    spi_xfer           ; get data byte into W
+    movwf   POSTINC0, A        ; store into *FSR0, FSR0++
+
+    ; dec 16-bit counter
+    decfsz  sd_cntL, F, A
+    bra     sd_rd_loop
+    decfsz  sd_cntH, F, A
+    bra     sd_rd_loop
+
+    ; 7) Read 2-byte CRC and ignore
+    movlw   0xFF
+    call    spi_xfer
+    movlw   0xFF
+    call    spi_xfer
+
+    ; 8) Deselect card, extra clocks
+    SD_CS_HIGH
+    movlw   0xFF
+    call    spi_xfer
+
+    ; success: sd_r1 already 0x00 from CMD17
+    return
+
+sd_read_block_fail:
+    SD_CS_HIGH
+    movlw   0xFF
+    call    spi_xfer           ; extra clocks
+
+    movlw   0x02               ; "generic read error"
+    movwf   sd_r1, A
+    return
+
+;------------------------------------------------
+; sd_test_verify:
+;   Read back test block and verify all 0xAA.
+;   Uses the same LBA as sd_test_write (0x00001000).
+;   On return:
+;       sd_r1 = 0x00 if data matches
+;             = 0x03 on mismatch
+;             = other non-zero if sd_read_block failed
+;------------------------------------------------
+sd_test_verify:
+    ; 1) Set same test block number: LBA = 0x00001000
+    clrf    sd_arg3, A         ; 0x00
+    clrf    sd_arg2, A         ; 0x00
+    movlw   0x10
+    movwf   sd_arg1, A
+    clrf    sd_arg0, A
+
+    ; 2) Read block into sd_buf
+    call    sd_read_block      ; sd_r1 = 0x00 on success
+    movf    sd_r1, W, A
+    xorlw   0x00
+    btfss   STATUS, 2, A       ; if not zero, read error
+    return                     ; sd_r1 already holds error
+
+    ; 3) Verify all 512 bytes == 0xAA
+    lfsr    0, sd_buf
+
+    movlw   low 512            ; 0x00
+    movwf   sd_cntL, A
+    movlw   high 512           ; 0x02
+    movwf   sd_cntH, A
+
+sd_ver_loop:
+    movf    POSTINC0, W, A     ; W = *FSR0
+
+    xorlw   0xAA               ; compare with 0xAA
+    btfss   STATUS, 2, A       ; Z=1 if equal
+    bra     sd_ver_fail
+
+    ; dec 16-bit counter
+    decfsz  sd_cntL, F, A
+    bra     sd_ver_loop
+    decfsz  sd_cntH, F, A
+    bra     sd_ver_loop
+
+    ; if we get here, all 512 bytes matched
+    movlw   0x00
+    movwf   sd_r1, A
+    return
+
+sd_ver_fail:
+    movlw   0x03               ; "verify mismatch"
+    movwf   sd_r1, A
+    return
+
+;------------------------------------------------
 ; delay_ms: crude longer delay
 ;------------------------------------------------
 delay_ms:
-    movlw   0xFF
-    movwf   delay1, A
-d1_loop:
+    movlw   0x10
+    movwf   delay1, A      ; outer loop
+delay_outer:
     movlw   0xFF
     movwf   delay2, A
-d2_loop:
+delay_mid:
+    movlw   0xFF
+    movwf   sd_tmp, A
+delay_inner:
+    decfsz  sd_tmp, F, A
+    bra     delay_inner
+
     decfsz  delay2, F, A
-    bra     d2_loop
+    bra     delay_mid
+
     decfsz  delay1, F, A
-    bra     d1_loop
+    bra     delay_outer
+
     return
 
 ;------------------------------------------------
