@@ -301,9 +301,6 @@ sd_read_r7:
 
     SD_CS_HIGH
 
-    ; If bit2 (illegal command) set, it's old SD <2GB.
-    ; For SDXC it should NOT be set, but we won?t special-case it here.
-
     ; --- ACMD41 loop: initialise (HCS set) ---
     movlw   0xFF                ; many tries
     movwf   sd_retry, A
@@ -446,6 +443,138 @@ sd_fail_other_blink_loop:
     bra     sd_fail_other_loop
 
 ;------------------------------------------------
+; sd_wait_not_busy
+;   Polls MISO by sending 0xFF until card responds
+;   with 0xFF (not busy) or timeout.
+;   Output:
+;       sd_tmp = last byte read
+;   On timeout, sd_tmp != 0xFF.
+;------------------------------------------------
+sd_wait_not_busy:
+    movlw   0xFF
+    movwf   sd_retry, A       ; number of polls
+
+sd_wait_nb_loop:
+    movlw   0xFF
+    call    spi_xfer          ; read response into W
+    movwf   sd_tmp, A
+
+    movf    sd_tmp, W, A
+    xorlw   0xFF
+    btfsc   STATUS, 2, A      ; Z=1 if 0xFF (not busy)
+    return                    ; done
+
+    decfsz  sd_retry, F, A
+    bra     sd_wait_nb_loop
+
+    ; timeout, still busy
+    return
+    
+;------------------------------------------------
+; sd_write_block:
+;   Write one 512-byte block from sd_buf.
+;   Input:
+;       sd_arg3..sd_arg0 = block number (SDHC/SDXC)
+;       sd_buf[512]      = data to write
+;   Output:
+;       sd_r1 = 0x00 on success (CMD24 R1)
+;              non-zero on error
+;------------------------------------------------
+sd_write_block:
+    ; 1) Select card
+    SD_CS_LOW
+
+    ; 2) CRC can be dummy for CMD24 once CRC disabled
+    movlw   0xFF
+    movwf   sd_crc, A
+
+    ; 3) Send CMD24 (index 24)
+    movlw   24                  ; CMD24 index
+    call    sd_send_cmd         ; R1 -> sd_r1
+
+    ; 4) Check R1 (must be 0x00)
+    movf    sd_r1, W, A
+    xorlw   0x00
+    btfsc   STATUS, 2, A        ; Z=1 if R1 == 0
+    bra     sd_write_cmd_ok
+
+    ; command rejected or card not ready
+    bra     sd_write_block_fail
+
+sd_write_cmd_ok:
+    ; 5) Send one dummy 0xFF before data token (optional but common)
+    movlw   0xFF
+    call    spi_xfer
+
+    ; 6) Send data token 0xFE
+    movlw   0xFE
+    call    spi_xfer
+
+    ; 7) Send 512 data bytes from sd_buf
+    ;    Use FSR0 to walk the buffer
+    lfsr    0, sd_buf
+
+    ; set 16-bit count = 512 (0x0200)
+    movlw   low 512            ; 0x00
+    movwf   sd_cntL, A
+    movlw   high 512           ; 0x02
+    movwf   sd_cntH, A
+
+sd_wr_loop:
+    movf    POSTINC0, W, A     ; W = *FSR0; FSR0++
+    call    spi_xfer           ; send data byte
+
+    ; dec 16-bit counter
+    decfsz  sd_cntL, F, A
+    bra     sd_wr_loop
+    decfsz  sd_cntH, F, A
+    bra     sd_wr_loop
+
+    ; 8) Send 2-byte CRC (dummy)
+    movlw   0xFF
+    call    spi_xfer
+    movlw   0xFF
+    call    spi_xfer
+
+    ; 9) Read data response token
+    movlw   0xFF
+    call    spi_xfer
+    movwf   sd_token, A
+
+    ; lower 5 bits:
+    movf    sd_token, W, A
+    andlw   0x1F               ; mask to xxxxx
+    xorlw   0x05               ; 0b00101 = "data accepted"
+    btfss   STATUS, 2, A
+    bra     sd_write_block_fail ; not accepted
+
+    ; 10) Wait until card not busy
+    call    sd_wait_not_busy
+    movf    sd_tmp, W, A
+    xorlw   0xFF
+    btfss   STATUS, 2, A       ; Z=1 if sd_tmp == 0xFF (ready)
+    bra     sd_write_block_fail
+
+    ; 11) Deselect card, one extra 0xFF clocks
+    SD_CS_HIGH
+    movlw   0xFF
+    call    spi_xfer
+
+    ; indicate success: R1 already 0x00
+    return
+
+sd_write_block_fail:
+    ; clean up chip select
+    SD_CS_HIGH
+    movlw   0xFF
+    call    spi_xfer           ; extra clocks
+
+    ; set a non-zero error code if you like
+    movlw   0x01
+    movwf   sd_r1, A           ; "generic write error"
+    return
+
+;------------------------------------------------
 ; delay_ms: crude longer delay
 ;------------------------------------------------
 delay_ms:
@@ -491,5 +620,13 @@ sd_arg1:    ds  1     ; arg[15:8]
 sd_arg2:    ds  1     ; arg[23:16]
 sd_arg3:    ds  1     ; arg[31:24]
 sd_crc:     ds  1     ; CRC byte for command
+
+sd_cntL:    ds  1     ; 16-bit byte counter L
+sd_cntH:    ds  1     ; 16-bit byte counter H
+sd_token:   ds  1     ; data response / token
+
+; --- big SD sector buffer in linear RAM ---
+    PSECT   sd_buf_ram, class=BIGRAM, space=1, noexec
+sd_buf:     ds  512
 
     END     reset_vector
