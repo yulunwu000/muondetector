@@ -90,12 +90,16 @@ start:
     ;   Expected: 0x01 (idle state)
     ;-----------------------------
     movf    sd_r1, W, A        ; W = sd_r1
-    xorlw   0x01               ; compare with 0x01
-    btfsc   STATUS, 2, A       ; Z flag set if equal
-    bra     sd_ok              ; if sd_r1 == 0x01 ? OK
+    xorlw   0xFF               ; compare with 0x01
+    btfsc   STATUS, 2, A       ; Z = 1 if sd_r1 == 0xFF
+    bra     sd_fail              ; if no response, fast blink
 
-    ; anything else = fail
-    bra     sd_fail
+    movf    sd_r1, W, A
+    xorlw   0x01
+    btfsc   STATUS, 2, A
+    bra     sd_ok              ; OK path
+    
+    bra     sd_fail_other
 
     ;-----------------------------
     ; main muon loop here
@@ -185,7 +189,10 @@ sd_init:
     call    sd_clock_80
 
     ; 2) Select card
-SD_CS_LOW
+    SD_CS_LOW
+    ; clock one more dummy byte before CMD0
+    movlw   0xFF
+    call    spi_xfer
 
     ; 3) Send CMD0
     call    sd_send_cmd0
@@ -238,6 +245,44 @@ sd_fail_loop:
     bra     sd_fail_loop
 
 ;------------------------------------------------
+; sd_fail_other:
+;  Blink pattern encodes sd_r1 low nibble:
+;  - Extract low 4 bits of sd_r1
+;  - Blink that many times, then long pause, repeat
+;------------------------------------------------
+sd_fail_other:
+    ; Get low nibble of sd_r1 into err_cnt
+    movf    sd_r1, W, A
+    andlw   0x0F              ; keep only low nibble
+    bz      sd_fail_other_zero ; if 0, treat as 16 blinks to be visible
+    movwf   err_cnt, A
+    bra     sd_fail_other_loop_start
+
+sd_fail_other_zero:
+    movlw   0x10              ; 0x0 -> 16 blinks
+    movwf   err_cnt, A
+
+sd_fail_other_loop_start:
+sd_fail_other_loop:
+    ; copy err_cnt to sd_tmp as loop counter
+    movf    err_cnt, W, A
+    movwf   sd_tmp, A
+
+sd_fail_other_blink_loop:
+    bsf     LATD, 4, A        ; LED on
+    call    delay_ms_short
+    bcf     LATD, 4, A        ; LED off
+    call    delay_ms_short
+    decfsz  sd_tmp, F, A
+    bra     sd_fail_other_blink_loop
+
+    ; long pause between groups
+    call    delay_ms
+    call    delay_ms
+
+    bra     sd_fail_other_loop
+
+;------------------------------------------------
 ; delay_ms: crude longer delay
 ;------------------------------------------------
 delay_ms:
@@ -276,5 +321,6 @@ sd_r1:      ds  1
 sd_retry:   ds  1
 delay1:     ds  1
 delay2:     ds  1
+err_cnt:    ds  1
 
     END     reset_vector
