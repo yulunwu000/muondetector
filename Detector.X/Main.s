@@ -50,8 +50,8 @@ ST_INPULSE  EQU 1      ; currently in a pulse (tracking max)
 ST_DEAD     EQU 2      ; in dead-time, ignore new pulses
 
 ;==== Thresholds in ADRESH units =================================
-SIGNAL_HI   EQU 0x10   ; ~0.32 V
-RESET_HI    EQU 0x08   ; ~0.16 V
+SIGNAL_HI   EQU 0x04   ; ~0.32 V
+RESET_HI    EQU 0x01   ; ~0.16 V
 
 ;==== Dead-time in number of samples  ============================
 DEAD_SAMPLES EQU 20    ; 20 samples 
@@ -85,20 +85,9 @@ irq_high:
     ; Read ADC results
     movf    ADRESH, W, A
     movwf   adc_hi, A
-    
-    ; DEBUG: slow blink ? toggle LED only when 16-bit counter overflows
-    incfsz  irqCountL, F, A
-    bra     no_toggle
-    incfsz  irqCountH, F, A
-    bra     no_toggle
-
-    ; If we get here, both bytes just rolled over (overflow)
-    btg     LATD, 4, A
-
-no_toggle:
 
     ; Call state-machine handler
-    ;call    adc_sample_handler
+    call    adc_sample_handler
 
     ; Start next conversion (continuous sampling)
     bsf     ADCON0, 1, A    ; GO/DONE = 1
@@ -200,20 +189,32 @@ main_loop:
 ;   - controls LED on RD4
 ;================================================
 adc_sample_handler:
+     ; Handle LED flash decay regardless of state
+    movf    led_flash, F, A
+    btfsc   STATUS, 2, A     ; Z=1 if led_flash == 0
+    bra     led_flash_done
 
-    ; Decide which state we?re in
-    movf    adc_state, W, A
-    sublw   ST_IDLE           ; Z=1 if adc_state == ST_IDLE
-    btfsc   STATUS, 2, A      ; Z bit (2)
-    bra     adc_idle
+    decfsz  led_flash, F, A
+    bra     led_flash_done
 
-    movf    adc_state, W, A
-    sublw   ST_INPULSE        ; Z=1 if adc_state == ST_INPULSE
-    btfsc   STATUS, 2, A
-    bra     adc_inpulse
+    ; When led_flash just hit 0, turn LED off
+    bcf     LATD, 4, A
+    return
+
+led_flash_done:
+ ;   ; Decide which state we?re in
+  ;  movf    adc_state, W, A
+   ; sublw   ST_IDLE           ; Z=1 if adc_state == ST_IDLE
+ ;   btfsc   STATUS, 2, A      ; Z bit (2)
+  ;  bra     adc_idle
+;
+ ;   movf    adc_state, W, A
+  ;  sublw   ST_INPULSE        ; Z=1 if adc_state == ST_INPULSE
+   ; btfsc   STATUS, 2, A
+    ;bra     adc_inpulse
 
     ; Otherwise treat as ST_DEAD
-    bra     adc_dead
+    ;bra     adc_dead
 
 ;---------------- IDLE state ----------------
 ; Waiting for adc_hi >= SIGNAL_HI
@@ -232,6 +233,8 @@ adc_idle:
     movwf   adc_state, A
 
     ; LED ON (RD4)
+    movlw   50              ; 50 samples * 256µs ? 12.8 ms
+    movwf   led_flash, A
     bsf     LATD, 4, A
 
     return
@@ -315,4 +318,6 @@ dead_count:     ds 1   ; down-counter for dead-time
 
 irqCountL:      ds 1
 irqCountH:      ds 1
+led_flash:     ds 1
+    
     END     reset_vector
