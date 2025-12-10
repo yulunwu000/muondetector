@@ -96,18 +96,17 @@ log_buf:      ds  512       ; raw records, exactly one sector
     PSECT   code, class=CODE    
 
 start:
-    ;-----------------------------
-    ; Configure LED on RD4
-    ;-----------------------------
+    
     bcf     TRISD, 4, A        ; RD4 as output
     bcf     LATD, 4, A         ; LED off initially
+    
+    ; Timer0 16-bit, internal clock, prescale 1:64
+    movlw   0x87        ; T0CON: 16-bit, Fosc/4, prescale 1:256
+    movwf   T0CON, A
+    bsf     T0CON, 7, A ; TMR0ON = 1
 
-    ;-----------------------------
-    ; Initialise SD card
-    ;-----------------------------
     call    spi_init
     call    sd_init
- 
     ;-----------------------------
     ; Check sd_r1 (R1 response to CMD0)
     ;   Expected: 0x01 (idle state)
@@ -115,7 +114,7 @@ start:
     movf    sd_r1, W, A        ; W = sd_r1
     xorlw   0xFF               ; compare with 0xFF
     btfsc   STATUS, 2, A       ; Z = 1 if sd_r1 == 0xFF
-    bra     sd_fail            ; if no response, fast blink
+    bra     sd_fail_other            ; if no response, fast blink
 
     movf    sd_r1, W, A
     xorlw   0x00
@@ -146,70 +145,82 @@ start:
     ; anything else = read/verify error
     bra     sd_fail_other
 
-
 ;-----------------------------
-; main muon loop here
+; main test loop:
+;  - fill log_buf with fake records
+;  - when 64 records collected, write one SD block
 ;-----------------------------
-    main_loop:
-	; check if buffer full (64 records)
-	movf    log_index, W, A
-	xorlw   LOG_RECS_PER_SECTOR
-	btfss   STATUS, 2, A
-	bra     main_loop          ; not full yet ? spin (for now)
+main_loop:
+    ; if buffer full (64 records), go write it
+    movf    log_index, W, A
+    xorlw   LOG_RECS_PER_SECTOR   ; 64
+    btfsc   STATUS, 2, A          ; Z=1 if log_index == 64
+    bra     main_flush_sector
 
-	; --- copy 512 bytes from log_buf -> sd_buf ---
-	lfsr    0, log_buf
-	lfsr    1, sd_buf
+    ; otherwise, create one fake event record
+    call    make_fake_event
+    bra     main_loop
 
-	movlw   low 512            ; 0x00
-	movwf   sd_cntL, A
-	movlw   high 512           ; 0x02
-	movwf   sd_cntH, A
+;--- flush one full sector to SD ---
+main_flush_sector:
+    ; --- copy 512 bytes from log_buf -> sd_buf ---
+    lfsr    0, log_buf
+    lfsr    1, sd_buf
 
-    copy_loop:
-	movf    POSTINC0, W, A
-	movwf   POSTINC1, A
+    movlw   low 512            ; 0x00
+    movwf   sd_cntL, A
+    movlw   high 512           ; 0x02
+    movwf   sd_cntH, A
 
-	decfsz  sd_cntL, F, A
-	bra     copy_loop
-	decfsz  sd_cntH, F, A
-	bra     copy_loop
+copy_loop:
+    movf    POSTINC0, W, A
+    movwf   POSTINC1, A
 
-	; --- set sd_arg3..0 from log_blk3..0 ---
-	movf    log_blk3, W, A
-	movwf   sd_arg3, A
-	movf    log_blk2, W, A
-	movwf   sd_arg2, A
-	movf    log_blk1, W, A
-	movwf   sd_arg1, A
-	movf    log_blk0, W, A
-	movwf   sd_arg0, A
+    decfsz  sd_cntL, F, A
+    bra     copy_loop
+    decfsz  sd_cntH, F, A
+    bra     copy_loop
 
-	; --- write block ---
-	call    sd_write_block
+    ; --- set sd_arg3..0 from log_blk3..0 ---
+    movf    log_blk3, W, A
+    movwf   sd_arg3, A
+    movf    log_blk2, W, A
+    movwf   sd_arg2, A
+    movf    log_blk1, W, A
+    movwf   sd_arg1, A
+    movf    log_blk0, W, A
+    movwf   sd_arg0, A
 
-	movf    sd_r1, W, A
-	xorlw   0x00
-	btfss   STATUS, 2, A
-	bra     main_write_error
+    ; --- write block ---
+    call    sd_write_block
 
-	; on success: increment block number
-	incf    log_blk0, F, A
-	btfsc   STATUS, 0, A
-	incf    log_blk1, F, A
-	btfsc   STATUS, 0, A
-	incf    log_blk2, F, A
-	btfsc   STATUS, 0, A
-	incf    log_blk3, F, A
+    movf    sd_r1, W, A
+    xorlw   0x00
+    btfss   STATUS, 2, A
+    bra     main_write_error
 
-	; clear log_index so ISR can refill from start
-	clrf    log_index, A
+    ; on success: increment block number
+    incf    log_blk0, F, A
+    btfsc   STATUS, 0, A
+    incf    log_blk1, F, A
+    btfsc   STATUS, 0, A
+    incf    log_blk2, F, A
+    btfsc   STATUS, 0, A
+    incf    log_blk3, F, A
 
-	bra     main_loop
+    ; clear log_index so we start filling next sector
+    clrf    log_index, A
 
-    main_write_error:
-	; for now just go to error blink
-	bra     sd_fail_other
+    ; (optional) short LED blink to show "sector written"
+    bsf     LATD, 4, A
+    call    delay_ms_short
+    bcf     LATD, 4, A
+
+    bra     main_loop
+
+main_write_error:
+    ; for now just go to error blink
+    bra     sd_fail_other
 
     ;-----------------------------
     ; SPI init for microSD (MSSP1)
@@ -244,7 +255,7 @@ spi_xfer:
     movwf   SSP1BUF, A          ; start transfer
 spi_wait:
     btfss   PIR1, 3, A         ; SSPIF set when done?
-    bra     spi_wait
+    bra     spi_wait 
     bcf     PIR1, 3, A
     movf    SSP1BUF, W, A       ; read received byte
     return
@@ -673,9 +684,8 @@ sd_write_block_fail:
     movlw   0xFF
     call    spi_xfer           ; extra clocks
 
-    ; set a non-zero error code if you like
     movlw   0x01
-    movwf   sd_r1, A           ; "generic write error"
+    movwf   sd_r1, A           ;  write error
     return
 
 ;------------------------------------------------
@@ -869,6 +879,73 @@ sd_ver_fail:
     movlw   0x03               ; "verify mismatch"
     movwf   sd_r1, A
     return
+    
+;------------------------------------------------
+; make_fake_event:
+;   - Builds one 8-byte log record in log_buf
+;   - Uses:
+;       log_index (0..63)
+;       timestampL/timestampH (from TMR0L/H)
+;   Record format (for now):
+;       byte 0: log_index       (easy to recognise)
+;       byte 1: 0xAA            (marker)
+;       byte 2: timestampL
+;       byte 3: timestampH
+;       byte 4: 0x55            (marker)
+;       byte 5: 0x00
+;       byte 6: 0x00
+;       byte 7: 0x00
+;------------------------------------------------
+make_fake_event:
+    ; 1) Sample Timer0 into timestampL/H
+    movf    TMR0L, W, A
+    movwf   timestampL, A
+    movf    TMR0H, W, A
+    movwf   timestampH, A
+
+    ; 2) Compute offset = log_index * LOG_REC_SIZE (8)
+    movf    log_index, W, A
+    mullw   LOG_REC_SIZE      ; W * 8 -> PRODL (L), PRODH (H)
+
+    ; 3) FSR0 = log_buf + offset
+    movlw   low(log_buf)
+    addwf   PRODL, W, A       ; W = low(base) + offset L
+    movwf   FSR0L, A
+
+    movlw   high(log_buf)
+    addwfc  PRODH, W, A       ; W = high(base) + carry + offset H
+    movwf   FSR0H, A
+
+    ; 4) Write 8-byte record
+    ; byte 0: log_index
+    movf    log_index, W, A
+    movwf   POSTINC0, A
+
+    ; byte 1: 0xAA
+    movlw   0xAA
+    movwf   POSTINC0, A
+
+    ; byte 2: timestampL
+    movf    timestampL, W, A
+    movwf   POSTINC0, A
+
+    ; byte 3: timestampH
+    movf    timestampH, W, A
+    movwf   POSTINC0, A
+
+    ; byte 4: 0x55
+    movlw   0x55
+    movwf   POSTINC0, A
+
+    ; byte 5,6,7: zero for now
+    clrf    POSTINC0, A
+    clrf    POSTINC0, A
+    clrf    POSTINC0, A
+
+    ; 5) Increment log_index
+    incf    log_index, F, A
+
+    return    
 
 ;------------------------------------------------
 ; delay_ms: crude longer delay
@@ -911,6 +988,7 @@ d2s_loop:
     return
 
 ; variables:
+    GLOBAL  sd_r1
     PSECT   udata_acs
 sd_tmp:     ds  1
 sd_r1:      ds  1
@@ -928,6 +1006,9 @@ sd_crc:     ds  1     ; CRC byte for command
 sd_cntL:    ds  1     ; 16-bit byte counter L
 sd_cntH:    ds  1     ; 16-bit byte counter H
 sd_token:   ds  1     ; data response / token
+    
+timestampL: ds 1
+timestampH: ds 1
 
 ; --- big SD sector buffer in linear RAM ---
     PSECT   sd_buf_ram, class=BIGRAM, space=1, noexec
