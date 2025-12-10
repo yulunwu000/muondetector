@@ -44,6 +44,18 @@
     CONFIG  MSSPMSK = 1
     CONFIG  PMPMX   = DEFAULT
 
+;==== Event detection states =====================================
+ST_IDLE     EQU 0      ; waiting for pulse
+ST_INPULSE  EQU 1      ; currently in a pulse (tracking max)
+ST_DEAD     EQU 2      ; in dead-time, ignore new pulses
+
+;==== Thresholds in ADRESH units =================================
+SIGNAL_HI   EQU 0x01  ; ~0.32 V
+RESET_HI    EQU 0x00   ; ~0.16 V
+
+;==== Dead-time in number of samples  ============================
+DEAD_SAMPLES EQU 20    ; 20 samples 
+
 ;--------------------------------------
 ; Reset vector
 ;--------------------------------------
@@ -52,6 +64,46 @@
 reset_vector:
     goto    start    ; on reset, CPU starts at 0x0000 and goes to start
 
+;--------------------------------------
+; Interrupt vector
+;--------------------------------------
+PSECT   intVec, class=CODE, abs
+ORG     0x0008
+irq_high:
+    ; Save context
+    movff   WREG,   saveW
+    movff   STATUS, saveSTATUS
+    movff   BSR,    saveBSR
+
+    ; Check ADC interrupt flag
+    btfss   PIR1, 6, A      ; ADC conversion complete?
+    bra     irq_other       ; (handle other IRQs if any)
+
+    ; Clear ADC interrupt flag
+    bcf     PIR1, 6, A
+
+    ; Read ADC results
+    movf    ADRESH, W, A
+    movwf   adc_hi, A
+
+    ; Call state-machine handler
+    call    adc_sample_handler
+
+    ; Start next conversion (continuous sampling)
+    bsf     ADCON0, 1, A    ; GO/DONE = 1
+
+    bra     irq_exit
+
+irq_other:
+    ; handle other interrupt sources here
+
+irq_exit:
+    ; Restore context
+    movff   saveBSR,    BSR
+    movff   saveSTATUS, STATUS
+    movff   saveW,      WREG
+    retfie  1
+    
 ;--------------------------------------
 ; Main code
 ;--------------------------------------
@@ -62,74 +114,135 @@ start:
     ;------------------------------------------------
     ; PORT setup
     ;------------------------------------------------
-    bsf     TRISA, 0, A        ; configure RA0 (AN0) as input for ADC
+    bsf	    TRISA, 2, A            ; RA2 input
     clrf    TRISD, A           ; all PORTD as outputs
+    bsf     TRISB, 2, A        ; RB2 as input (UVP / INT)
     bcf     LATD, 4, A         ; LD1 (RD4) off initially
-
+    
     ;------------------------------------------------
-    ; Make RA0 analog, others digital
+    ; Force single interrupt priority mode, clean flags
+    ;------------------------------------------------
+    bcf     RCON, 7, A        ; IPEN = 0  ? single priority, vector @ 0x0008
+
+    clrf    INTCON, A         ; disable all core interrupts + clear TMR0IF, INT0IF, RBIF
+    clrf    PIR1, A           ; clear all peripheral interrupt flags (incl. ADIF)
+    clrf    PIE1, A           ; disable all peripheral interrupts
+    clrf    led_flash, A
+    movlw   1
+    movwf   armed, A          ; start armed
+
+    
+    ;------------------------------------------------
+    ; Make RA2 (AN2) analog, others digital
     ; bit = 0 to analog, 1 to digital
     ;------------------------------------------------
-    movlw   0xFE               ; 1111 1110b: AN0 analog, AN1?AN7 digital since bit0=0, bits1-7=1
+    bsf     WDTCON, 4, A       ; ADSHR = 1 -> access ANCON0/ANCON
+    
+    movlw   0xFB		       ; AN2 analog
     movwf   ANCON0, A
-    movlw   0xFF               ; AN8?AN12 all digital
+    
+    movlw   0xFF            ; all upper analog pins digital (AN8?AN12)
     movwf   ANCON1, A
+    
+    bcf     WDTCON, 4, A       ; ADSHR = 0 -> back to ADCON0/ADCON1
 
     ;-----------------------------
     ; ADC setup for PIC18F87J50
     ;-----------------------------
-    ; ADCON0: select AN0, Vref = Vdd/Vss, ADC on
-    movlw   0x01     ; VCFG1:VCFG0 = 00, CHS3:0 = 0000 (AN0), ADON = 1
-    movwf   ADCON0, A
+    ; ADCON0: select AN2, Vref = Vdd/Vss, ADC on
+    movlw 0x09      ; 0000 1001b
+    movwf ADCON0, A
 
     ; ADCON1: ADFM=1 (right justify),
     ;         ACQT2:0 = 111  (20 Tad),
     ;         ADCS2:0 = 110  (Fosc/64)
-    movlw   0xBE       ; ADFM=1, ADCAL=0, ACQT=111, ADCS=110
+    movlw   0x82       ; ADFM=1, ADCAL=0, ACQT=111, ADCS=110
     movwf   ADCON1, A
-  
+
+    ; --- Initialize event detection state ---
+    clrf    adc_state, A     ; ST_IDLE
+    clrf    pulse_max, A
+    clrf    dead_count, A
+    clrf    adc_state, A
+    clrf    pulse_max, A
+    clrf    dead_count, A
+    clrf    irqCountL, A
+    clrf    irqCountH, A
+
+    ; --- Enable ADC interrupt ---
+    bsf     PIE1, 6, A        ; enable ADIE (bit 6)
+
+    ; --- Enable global + peripheral interrupts ---
+    bsf     INTCON, 6, A      ; PEIE (bit 6)
+    bsf     INTCON, 7, A      ; GIE  (bit 7)
+    
+    ; --- Start first conversion ---
+    bsf     ADCON0, 1, A     ; GO/DONE = 1
+
 main_loop:
-    ;------------------------------------------------
-    ; Start conversion on AN0
-    ;------------------------------------------------
-    bsf     ADCON0, 1, A       ; GO/DONE = 1
-
-wait_conv:
-    btfsc   ADCON0, 1, A       ; wait while GO/DONE = 1
-    bra     wait_conv
-
-    ;------------------------------------------------
-    ; Compare ADRESH with threshold
-    ;------------------------------------------------
-    movlw   0x10               ; adjust threshold as needed
-    subwf   ADRESH, W, A       ; W = ADRESH minus 0x20
-
-    btfss   STATUS, 0, A       ; C=1 if ADRESH <= 0x20
-    bra     below_thresh       ; if C=0, below threshold
-
-; === pulse detected ===
-pulse_detected:
-    bsf     LATD, 4, A         ; turn LD1 on
-
-    ; short visible delay so you can see the blink
-    movlw   0x20
-    movwf   delay1, A
-delay1_loop:
-    movlw   0xFF
-    movwf   delay2, A
-delay2_loop:
-    decfsz  delay2, F, A
-    bra     delay2_loop
-    decfsz  delay1, F, A
-    bra     delay1_loop
-
-    bcf     LATD, 4, A         ; LED off again
+    ; ADC + LED logic is driven by interrupts
+    ; add:
+    ;   - service SD card
+    ;   - SPI, UART, etc.
     bra     main_loop
 
-below_thresh:
-    bcf     LATD, 4, A         ; make sure LED is off
-    bra     main_loop
+;================================================
+; ADC sample handler - LED latch version
+;   - adc_hi holds ADRESH of latest sample
+;   - LED flashes visibly when adc_hi crosses SIGNAL_HI
+;================================================
+adc_sample_handler:
+    ;----------------------------------------
+    ; 1) LED flash decay
+    ;----------------------------------------
+    movf    led_flash, F, A
+    btfsc   STATUS, 2, A        ; Z = 1 if led_flash == 0
+    bra     no_flash_dec
 
+    decfsz  led_flash, F, A
+    bra     no_flash_dec
+
+    ; Just reached 0 -> turn LED off
+    bcf     LATD, 4, A
+
+no_flash_dec:
+
+    ;----------------------------------------
+    ; 2) Above SIGNAL_HI?
+    ;----------------------------------------
+    movlw   SIGNAL_HI
+    subwf   adc_hi, W, A        ; W = adc_hi - SIGNAL_HI
+    btfss   STATUS, 0, A        ; C=1 if adc_hi >= SIGNAL_HI
+    bra     below_signal
+
+    ; adc_hi >= SIGNAL_HI
+    ; Only trigger if we're armed
+    movf    armed, F, A
+    btfsc   STATUS, 2, A        ; Z=1 if armed == 0
+    return                      ; already in a pulse, ignore
+
+    ; New event detected!
+    movlw   0
+    movwf   armed, A            ; disarm until we fall below RESET_HI
+
+    movlw   200                 ; flash length in samples
+    movwf   led_flash, A        ; e.g. 200 * ~30-60 µs ? a few ms
+    bsf     LATD, 4, A          ; LED ON
+    return
+
+below_signal:
+    ;----------------------------------------
+    ; 3) Below SIGNAL_HI: check reset level
+    ;----------------------------------------
+    movlw   RESET_HI
+    subwf   adc_hi, W, A        ; W = adc_hi - RESET_HI
+    btfsc   STATUS, 0, A        ; C=1 if adc_hi >= RESET_HI
+    return                      ; not fully reset yet
+
+    ; Now adc_hi < RESET_HI -> re-arm for next event
+    movlw   1
+    movwf   armed, A
+    return
 
 ;------------------------------------------------
 ; RAM variables (in access bank)
@@ -137,5 +250,19 @@ below_thresh:
     PSECT   udata_acs
 delay1:     ds  1
 delay2:     ds  1
+saveW:          ds 1
+saveSTATUS:     ds 1
+saveBSR:        ds 1
 
+adc_hi:         ds 1   ; last ADRESH
+adc_state:      ds 1   ; 0/1/2 = IDLE / INPULSE / DEAD
+pulse_max:      ds 1   ; max ADRESH seen in this pulse
+dead_count:     ds 1   ; down-counter for dead-time
+
+irqCountL:      ds 1
+irqCountH:      ds 1
+led_flash:      ds 1
+armed:	        ds 1      ; 1 = ready to detect a new pulse, 0 = waiting for reset
+
+    
     END     reset_vector
