@@ -186,11 +186,14 @@ main_loop:
     ;   - SPI, UART, etc.
     bra     main_loop
 
+;;================================================
+; ADC sample handler - LED latch + peak tracking
+;   - adc_hi     = latest ADRESH
+;   - armed=1    = ready for new pulse
+;   - armed=0    = currently in a pulse (track peak)
+;   - pulse_max  = max ADRESH seen during this pulse
 ;================================================
-; ADC sample handler - LED latch version
-;   - adc_hi holds ADRESH of latest sample
-;   - LED flashes visibly when adc_hi crosses SIGNAL_HI
-;================================================
+    
 adc_sample_handler:
     ;----------------------------------------
     ; 1) LED flash decay
@@ -208,41 +211,76 @@ adc_sample_handler:
 no_flash_dec:
 
     ;----------------------------------------
-    ; 2) Above SIGNAL_HI?
+    ; 2) If we are in a pulse (armed == 0), track peak in pulse_max
+    ;----------------------------------------
+    movf    armed, F, A
+    btfsc   STATUS, 2, A        ; Z = 1 if armed == 0
+    bra     in_pulse_do_peak    ; we're in a pulse, update peak
+    bra     skip_peak           ; armed != 0 ? not in pulse
+
+in_pulse_do_peak:
+    ; Compare adc_hi with pulse_max
+    movf    adc_hi, W, A
+    subwf   pulse_max, W, A     ; W = pulse_max - adc_hi
+    btfsc   STATUS, 0, A        ; C=1 if pulse_max >= adc_hi
+    bra     skip_peak           ; existing peak is larger/equal
+
+    ; adc_hi > pulse_max ? update peak
+    movf    adc_hi, W, A
+    movwf   pulse_max, A
+
+skip_peak:
+
+    ;----------------------------------------
+    ; 3) Check if adc_hi >= SIGNAL_HI (leading edge)
     ;----------------------------------------
     movlw   SIGNAL_HI
     subwf   adc_hi, W, A        ; W = adc_hi - SIGNAL_HI
     btfss   STATUS, 0, A        ; C=1 if adc_hi >= SIGNAL_HI
-    bra     below_signal
+    bra     below_signal        ; below threshold ? handle reset logic
 
     ; adc_hi >= SIGNAL_HI
-    ; Only trigger if we're armed
+    ; Only trigger if we're armed (i.e. not already in a pulse)
     movf    armed, F, A
     btfsc   STATUS, 2, A        ; Z=1 if armed == 0
-    return                      ; already in a pulse, ignore
+    return                      ; already in a pulse, ignore this sample
 
-    ; New event detected!
+    ;----------------------------------------
+    ; 4) New event detected!
+    ;----------------------------------------
     movlw   0
     movwf   armed, A            ; disarm until we fall below RESET_HI
 
+    ; initialise peak with this first above-threshold sample
+    movf    adc_hi, W, A
+    movwf   pulse_max, A
+
+    ; LED ON (visible flash)
     movlw   200                 ; flash length in samples
-    movwf   led_flash, A        ; e.g. 200 * ~30-60 µs ? a few ms
-    bsf     LATD, 4, A          ; LED ON
+    movwf   led_flash, A        ; e.g. 200 * sample_period ? few ms
+    bsf     LATD, 4, A
     return
 
 below_signal:
     ;----------------------------------------
-    ; 3) Below SIGNAL_HI: check reset level
+    ; 5) Below SIGNAL_HI: check reset level for re-arming
     ;----------------------------------------
     movlw   RESET_HI
     subwf   adc_hi, W, A        ; W = adc_hi - RESET_HI
     btfsc   STATUS, 0, A        ; C=1 if adc_hi >= RESET_HI
-    return                      ; not fully reset yet
+    return                      ; not fully reset yet ? stay disarmed
 
     ; Now adc_hi < RESET_HI -> re-arm for next event
     movlw   1
     movwf   armed, A
+
+    ; *** IMPORTANT COMMENT:
+    ; At this point, pulse_max holds the FULL PEAK amplitude
+    ; of the *previous* pulse. This is where you will eventually
+    ; push (pulse_max, timestamp, etc.) into your SD log buffer.
+
     return
+
 
 ;------------------------------------------------
 ; RAM variables (in access bank)
