@@ -50,8 +50,8 @@ ST_INPULSE  EQU 1      ; currently in a pulse (tracking max)
 ST_DEAD     EQU 2      ; in dead-time, ignore new pulses
 
 ;==== Thresholds in ADRESH units =================================
-SIGNAL_HI   EQU 0x04   ; ~0.32 V
-RESET_HI    EQU 0x01   ; ~0.16 V
+SIGNAL_HI   EQU 0x01  ; ~0.32 V
+RESET_HI    EQU 0x00   ; ~0.16 V
 
 ;==== Dead-time in number of samples  ============================
 DEAD_SAMPLES EQU 20    ; 20 samples 
@@ -127,6 +127,10 @@ start:
     clrf    INTCON, A         ; disable all core interrupts + clear TMR0IF, INT0IF, RBIF
     clrf    PIR1, A           ; clear all peripheral interrupt flags (incl. ADIF)
     clrf    PIE1, A           ; disable all peripheral interrupts
+    clrf    led_flash, A
+    movlw   1
+    movwf   armed, A          ; start armed
+
     
     ;------------------------------------------------
     ; Make RA2 (AN2) analog, others digital
@@ -152,7 +156,7 @@ start:
     ; ADCON1: ADFM=1 (right justify),
     ;         ACQT2:0 = 111  (20 Tad),
     ;         ADCS2:0 = 110  (Fosc/64)
-    movlw   0xBE       ; ADFM=1, ADCAL=0, ACQT=111, ADCS=110
+    movlw   0x82       ; ADFM=1, ADCAL=0, ACQT=111, ADCS=110
     movwf   ADCON1, A
 
     ; --- Initialize event detection state ---
@@ -183,124 +187,63 @@ main_loop:
     bra     main_loop
 
 ;================================================
-; ADC sample handler - one detector on AN2
+; ADC sample handler - LED latch version
 ;   - adc_hi holds ADRESH of latest sample
-;   - states: ST_IDLE / ST_INPULSE / ST_DEAD
-;   - controls LED on RD4
+;   - LED flashes visibly when adc_hi crosses SIGNAL_HI
 ;================================================
 adc_sample_handler:
-     ; Handle LED flash decay regardless of state
+    ;----------------------------------------
+    ; 1) LED flash decay
+    ;----------------------------------------
     movf    led_flash, F, A
-    btfsc   STATUS, 2, A     ; Z=1 if led_flash == 0
-    bra     led_flash_done
+    btfsc   STATUS, 2, A        ; Z = 1 if led_flash == 0
+    bra     no_flash_dec
 
     decfsz  led_flash, F, A
-    bra     led_flash_done
+    bra     no_flash_dec
 
-    ; When led_flash just hit 0, turn LED off
+    ; Just reached 0 -> turn LED off
     bcf     LATD, 4, A
-    return
 
-led_flash_done:
- ;   ; Decide which state we?re in
-  ;  movf    adc_state, W, A
-   ; sublw   ST_IDLE           ; Z=1 if adc_state == ST_IDLE
- ;   btfsc   STATUS, 2, A      ; Z bit (2)
-  ;  bra     adc_idle
-;
- ;   movf    adc_state, W, A
-  ;  sublw   ST_INPULSE        ; Z=1 if adc_state == ST_INPULSE
-   ; btfsc   STATUS, 2, A
-    ;bra     adc_inpulse
+no_flash_dec:
 
-    ; Otherwise treat as ST_DEAD
-    ;bra     adc_dead
-
-;---------------- IDLE state ----------------
-; Waiting for adc_hi >= SIGNAL_HI
-adc_idle:
-    ; Check if above SIGNAL_HI
+    ;----------------------------------------
+    ; 2) Above SIGNAL_HI?
+    ;----------------------------------------
     movlw   SIGNAL_HI
-    subwf   adc_hi, W, A      ; W = adc_hi - SIGNAL_HI
-    btfss   STATUS, 0, A      ; C=1 if adc_hi >= SIGNAL_HI
-    return                    ; below threshold ? stay IDLE
+    subwf   adc_hi, W, A        ; W = adc_hi - SIGNAL_HI
+    btfss   STATUS, 0, A        ; C=1 if adc_hi >= SIGNAL_HI
+    bra     below_signal
 
-    ; Crossed SIGNAL_HI ? pulse start
-    movf    adc_hi, W, A
-    movwf   pulse_max, A      ; start tracking peak
+    ; adc_hi >= SIGNAL_HI
+    ; Only trigger if we're armed
+    movf    armed, F, A
+    btfsc   STATUS, 2, A        ; Z=1 if armed == 0
+    return                      ; already in a pulse, ignore
 
-    movlw   ST_INPULSE
-    movwf   adc_state, A
+    ; New event detected!
+    movlw   0
+    movwf   armed, A            ; disarm until we fall below RESET_HI
 
-    ; LED ON (RD4)
-    movlw   50              ; 50 samples * 256µs ? 12.8 ms
-    movwf   led_flash, A
-    bsf     LATD, 4, A
-
+    movlw   200                 ; flash length in samples
+    movwf   led_flash, A        ; e.g. 200 * ~30-60 µs ? a few ms
+    bsf     LATD, 4, A          ; LED ON
     return
 
-;---------------- IN_PULSE state ----------------
-; Track peak and look for drop below RESET_HI
-adc_inpulse:
-    ; 1) Track maximum
-    movf    adc_hi, W, A
-    subwf   pulse_max, W, A   ; W = pulse_max - adc_hi
-    btfsc   STATUS, 0, A      ; C=1 if pulse_max >= adc_hi
-    bra     adc_inpulse_check_tail
-
-    ; adc_hi > pulse_max ? update peak
-    movf    adc_hi, W, A
-    movwf   pulse_max, A
-
-adc_inpulse_check_tail:
-    ; 2) Check if signal has fallen below RESET_HI
+below_signal:
+    ;----------------------------------------
+    ; 3) Below SIGNAL_HI: check reset level
+    ;----------------------------------------
     movlw   RESET_HI
-    subwf   adc_hi, W, A      ; W = adc_hi - RESET_HI
-    btfsc   STATUS, 0, A      ; C=1 if adc_hi >= RESET_HI
-    return                    ; still above reset threshold ? stay IN_PULSE
+    subwf   adc_hi, W, A        ; W = adc_hi - RESET_HI
+    btfsc   STATUS, 0, A        ; C=1 if adc_hi >= RESET_HI
+    return                      ; not fully reset yet
 
-    ; Now adc_hi < RESET_HI ? end of pulse
-    ; LED OFF
-    bcf     LATD, 4, A
-
-    ; Start dead-time
-    movlw   DEAD_SAMPLES
-    movwf   dead_count, A
-
-    movlw   ST_DEAD
-    movwf   adc_state, A
-
-    ; Here is where you'd eventually:
-    ; - copy pulse_max into an event buffer for SD logging
-    ; - maybe latch a "new event" flag
+    ; Now adc_hi < RESET_HI -> re-arm for next event
+    movlw   1
+    movwf   armed, A
     return
 
-;---------------- DEAD state ----------------
-; Simple dead-time based on sample count; then wait
-; until clearly back below RESET_HI before going IDLE.
-adc_dead:
-    ; If dead_count > 0, just count down
-    movf    dead_count, F, A
-    btfsc   STATUS, 2, A      ; Z=1 if dead_count == 0
-    bra     adc_dead_check_reset
-
-    ; dead_count != 0 ? decrement and stay in DEAD
-    decfsz  dead_count, F, A
-    return                    ; not yet zero ? stay DEAD
-
-    ; If decfsz made it zero, fall through to reset check
-
-adc_dead_check_reset:
-    ; Only leave DEAD if we are clearly below RESET_HI
-    movlw   RESET_HI
-    subwf   adc_hi, W, A      ; W = adc_hi - RESET_HI
-    btfsc   STATUS, 0, A      ; C=1 if adc_hi >= RESET_HI
-    return                    ; still above reset threshold ? remain DEAD
-
-    ; Below RESET_HI and dead_count == 0 ? go back to IDLE
-    clrf    adc_state, A      ; ST_IDLE
-    return
-    
 ;------------------------------------------------
 ; RAM variables (in access bank)
 ;------------------------------------------------
@@ -318,6 +261,8 @@ dead_count:     ds 1   ; down-counter for dead-time
 
 irqCountL:      ds 1
 irqCountH:      ds 1
-led_flash:     ds 1
+led_flash:      ds 1
+armed:	        ds 1      ; 1 = ready to detect a new pulse, 0 = waiting for reset
+
     
     END     reset_vector
