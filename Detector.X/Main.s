@@ -50,8 +50,8 @@ ST_INPULSE  EQU 1      ; currently in a pulse (tracking max)
 ST_DEAD     EQU 2      ; in dead-time, ignore new pulses
 
 ;==== Thresholds in ADRESH units =================================
-SIGNAL_HI   EQU 0x01  ; ~0.32 V
-RESET_HI    EQU 0x00   ; ~0.16 V
+SIGNAL_HI   EQU 0x10  ; ~0.32 V
+RESET_HI    EQU 0x08   ; ~0.16 V
 
 ;==== Dead-time in number of samples  ============================
 DEAD_SAMPLES EQU 20    ; 20 samples 
@@ -81,13 +81,16 @@ irq_high:
 
     ; Clear ADC interrupt flag
     bcf     PIR1, 6, A
+    
+    movf    ADRESH, W, A    ; W = ADRESH (top 8 bits of ADC)
+    movwf   LATD, A         ; put it on PORTD LEDs
 
     ; Read ADC results
-    movf    ADRESH, W, A
-    movwf   adc_hi, A
+   ; movf    ADRESH, W, A
+   ; movwf   adc_hi, A
 
     ; Call state-machine handler
-    call    adc_sample_handler
+    ; call    adc_sample_handler
 
     ; Start next conversion (continuous sampling)
     bsf     ADCON0, 1, A    ; GO/DONE = 1
@@ -274,13 +277,10 @@ below_signal:
     movlw   1
     movwf   armed, A
 
-    ; *** IMPORTANT COMMENT:
     ; At this point, pulse_max holds the FULL PEAK amplitude
-    ; of the *previous* pulse. This is where you will eventually
-    ; push (pulse_max, timestamp, etc.) into your SD log buffer.
+    ; of the previous pulse. Push into buffer later.
 
     return
-
 
 ;------------------------------------------------
 ; RAM variables (in access bank)
