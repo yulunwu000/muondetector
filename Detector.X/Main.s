@@ -78,11 +78,13 @@ reset_vector:
 ; Buffer variables (access bank)
 ;--------------------------------------
     PSECT   udata_acs
-log_index:    ds  1         ; 0..64
-log_blk0:   ds 1   ; LSB
+log_index:  ds  1   ; 0..64
+log_blk0:   ds 1    ; LSB
 log_blk1:   ds 1
 log_blk2:   ds 1
-log_blk3:   ds 1   ; MSB
+log_blk3:   ds 1    ; MSB
+log_full:   ds 1    ; 0 = not full, 1 = full (needs flush)
+drop_count: ds 1    ; count events dropped when buffer full
     
 ;--------------------------------------
 ; One-sector log buffer in BIGRAM
@@ -152,14 +154,16 @@ start:
 ;-----------------------------
 main_loop:
     ; if buffer full (64 records), go write it
-    movf    log_index, W, A
-    xorlw   LOG_RECS_PER_SECTOR   ; 64
-    btfsc   STATUS, 2, A          ; Z=1 if log_index == 64
-    bra     main_flush_sector
+    movf    log_full, F, A
+    btfsc   STATUS, 2, A        ; Z=1 if log_full==0
+    bra     main_loop           ; later: service other tasks
 
-    ; otherwise, create one fake event record
-    call    make_fake_event
-    bra     main_loop
+    ; else flush sector
+    call    main_flush_sector
+    clrf    log_index, A
+    clrf    log_full, A
+    clrf    drop_count, A
+    return
 
 ;--- flush one full sector to SD ---
 main_flush_sector:
@@ -201,11 +205,11 @@ copy_loop:
 
     ; on success: increment block number
     incf    log_blk0, F, A
-    btfsc   STATUS, 0, A
+    btfsc   STATUS, 2, A     ; Z=1 means it wrapped 0xFF->0x00
     incf    log_blk1, F, A
-    btfsc   STATUS, 0, A
+    btfsc   STATUS, 2, A
     incf    log_blk2, F, A
-    btfsc   STATUS, 0, A
+    btfsc   STATUS, 2, A
     incf    log_blk3, F, A
 
     ; clear log_index so we start filling next sector
@@ -881,71 +885,66 @@ sd_ver_fail:
     return
     
 ;------------------------------------------------
-; make_fake_event:
-;   - Builds one 8-byte log record in log_buf
-;   - Uses:
-;       log_index (0..63)
-;       timestampL/timestampH (from TMR0L/H)
-;   Record format (for now):
-;       byte 0: log_index       (easy to recognise)
-;       byte 1: 0xAA            (marker)
-;       byte 2: timestampL
-;       byte 3: timestampH
-;       byte 4: 0x55            (marker)
-;       byte 5: 0x00
-;       byte 6: 0x00
-;       byte 7: 0x00
+; log_append_event (call from ISR when an event completes)
+; Inputs (example):
+;   pulse_max already in pulse_max
+;   timestampL/H already sampled into timestampL/H
+; Uses:
+;   log_index, log_full, log_buf
 ;------------------------------------------------
-make_fake_event:
-    ; 1) Sample Timer0 into timestampL/H
-    movf    TMR0L, W, A
-    movwf   timestampL, A
-    movf    TMR0H, W, A
-    movwf   timestampH, A
+log_append_event:
+    ; if log_full != 0 -> drop event quickly
+    movf    log_full, F, A
+    btfss   STATUS, 2, A        ; Z=1 if log_full==0
+    bra     log_drop
 
-    ; 2) Compute offset = log_index * LOG_REC_SIZE (8)
+    ; offset = log_index * 8
     movf    log_index, W, A
-    mullw   LOG_REC_SIZE      ; W * 8 -> PRODL (L), PRODH (H)
+    mullw   8                   ; PRODL/PRODH = offset
 
-    ; 3) FSR0 = log_buf + offset
+    ; FSR0 = log_buf + offset
     movlw   low(log_buf)
-    addwf   PRODL, W, A       ; W = low(base) + offset L
+    addwf   PRODL, W, A
     movwf   FSR0L, A
-
     movlw   high(log_buf)
-    addwfc  PRODH, W, A       ; W = high(base) + carry + offset H
+    addwfc  PRODH, W, A
     movwf   FSR0H, A
 
-    ; 4) Write 8-byte record
-    ; byte 0: log_index
-    movf    log_index, W, A
-    movwf   POSTINC0, A
+    ; Write record
+    movf    pulse_max, W, A
+    movwf   POSTINC0, A         ; byte0 = peak
 
-    ; byte 1: 0xAA
     movlw   0xAA
-    movwf   POSTINC0, A
+    movwf   POSTINC0, A         ; byte1 marker/flags
 
-    ; byte 2: timestampL
     movf    timestampL, W, A
-    movwf   POSTINC0, A
-
-    ; byte 3: timestampH
+    movwf   POSTINC0, A         ; byte2 time L
     movf    timestampH, W, A
-    movwf   POSTINC0, A
+    movwf   POSTINC0, A         ; byte3 time H
 
-    ; byte 4: 0x55
     movlw   0x55
-    movwf   POSTINC0, A
+    movwf   POSTINC0, A         ; byte4 marker/flags
 
-    ; byte 5,6,7: zero for now
-    clrf    POSTINC0, A
-    clrf    POSTINC0, A
-    clrf    POSTINC0, A
+    clrf    POSTINC0, A         ; byte5
+    clrf    POSTINC0, A         ; byte6
+    clrf    POSTINC0, A         ; byte7
 
-    ; 5) Increment log_index
+    ; log_index++
     incf    log_index, F, A
 
-    return    
+    ; if log_index == 64 -> log_full = 1
+    movf    log_index, W, A
+    xorlw   LOG_RECS_PER_SECTOR
+    btfss   STATUS, 2, A
+    return
+
+    movlw   1
+    movwf   log_full, A
+    return
+
+log_drop:
+    incf    drop_count, F, A
+    return
 
 ;------------------------------------------------
 ; delay_ms: crude longer delay
@@ -1009,6 +1008,7 @@ sd_token:   ds  1     ; data response / token
     
 timestampL: ds 1
 timestampH: ds 1
+pulse_max:   ds 1
 
 ; --- big SD sector buffer in linear RAM ---
     PSECT   sd_buf_ram, class=BIGRAM, space=1, noexec
