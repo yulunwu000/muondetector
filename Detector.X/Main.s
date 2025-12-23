@@ -50,8 +50,8 @@ ST_INPULSE  EQU 1      ; currently in a pulse (tracking max)
 ST_DEAD     EQU 2      ; in dead-time, ignore new pulses
 
 ;==== Thresholds in ADRESH units =================================
-SIGNAL_HI   EQU 0x01  ; ~0.32 V
-RESET_HI    EQU 0x00   ; ~0.16 V
+SIGNAL_HI   EQU 0x10  ; ~0.32 V
+RESET_HI    EQU 0x08   ; ~0.16 V
 
 ;==== Dead-time in number of samples  ============================
 DEAD_SAMPLES EQU 20    ; 20 samples 
@@ -81,13 +81,15 @@ irq_high:
 
     ; Clear ADC interrupt flag
     bcf     PIR1, 6, A
+    
+    movf    ADRESH, W, A    ; W = ADRESH (top 8 bits of ADC)
+    movwf   LATD, A         ; put it on PORTD LEDs
 
     ; Read ADC results
-    movf    ADRESH, W, A
     movwf   adc_hi, A
 
     ; Call state-machine handler
-    call    adc_sample_handler
+     call    adc_sample_handler
 
     ; Start next conversion (continuous sampling)
     bsf     ADCON0, 1, A    ; GO/DONE = 1
@@ -102,7 +104,7 @@ irq_exit:
     movff   saveBSR,    BSR
     movff   saveSTATUS, STATUS
     movff   saveW,      WREG
-    retfie  1
+    retfie  0
     
 ;--------------------------------------
 ; Main code
@@ -128,9 +130,6 @@ start:
     clrf    PIR1, A           ; clear all peripheral interrupt flags (incl. ADIF)
     clrf    PIE1, A           ; disable all peripheral interrupts
     clrf    led_flash, A
-    movlw   1
-    movwf   armed, A          ; start armed
-
     
     ;------------------------------------------------
     ; Make RA2 (AN2) analog, others digital
@@ -159,8 +158,9 @@ start:
     movlw   0x82       ; ADFM=1, ADCAL=0, ACQT=111, ADCS=110
     movwf   ADCON1, A
 
-    ; --- Initialize event detection state ---
-    clrf    adc_state, A     ; ST_IDLE
+    ; --- Initialise event detection state ---
+    movlw   ST_IDLE
+    movwf   adc_state, A
     clrf    pulse_max, A
     clrf    dead_count, A
     clrf    adc_state, A
@@ -189,98 +189,112 @@ main_loop:
 ;;================================================
 ; ADC sample handler - LED latch + peak tracking
 ;   - adc_hi     = latest ADRESH
-;   - armed=1    = ready for new pulse
-;   - armed=0    = currently in a pulse (track peak)
 ;   - pulse_max  = max ADRESH seen during this pulse
+;    UPDATED: CHANGING HYSTERISIS REARMING ENTIRELY TO FIXED DEADTIME
 ;================================================
     
 adc_sample_handler:
-    ;----------------------------------------
-    ; 1) LED flash decay
-    ;----------------------------------------
     movf    led_flash, F, A
-    btfsc   STATUS, 2, A        ; Z = 1 if led_flash == 0
-    bra     no_flash_dec
+    btfsc   STATUS, 2, A            ; if led_flash == 0
+    bra     adc_sm                  ; skip
 
     decfsz  led_flash, F, A
-    bra     no_flash_dec
+    bra     adc_sm
 
-    ; Just reached 0 -> turn LED off
+    ; reached 0 -> turn LED off
     bcf     LATD, 4, A
 
-no_flash_dec:
-
+adc_sm:
     ;----------------------------------------
-    ; 2) If we are in a pulse (armed == 0), track peak in pulse_max
+    ; 2) State machine: IDLE / INPULSE / DEAD
     ;----------------------------------------
-    movf    armed, F, A
-    btfsc   STATUS, 2, A        ; Z = 1 if armed == 0
-    bra     in_pulse_do_peak    ; we're in a pulse, update peak
-    bra     skip_peak           ; armed != 0 ? not in pulse
+    movf    adc_state, W, A
+    xorlw   ST_IDLE
+    btfsc   STATUS, 2, A
+    bra     st_idle
 
-in_pulse_do_peak:
-    ; Compare adc_hi with pulse_max
-    movf    adc_hi, W, A
-    subwf   pulse_max, W, A     ; W = pulse_max - adc_hi
-    btfsc   STATUS, 0, A        ; C=1 if pulse_max >= adc_hi
-    bra     skip_peak           ; existing peak is larger/equal
+    movf    adc_state, W, A
+    xorlw   ST_INPULSE
+    btfsc   STATUS, 2, A
+    bra     st_inpulse
 
-    ; adc_hi > pulse_max ? update peak
-    movf    adc_hi, W, A
-    movwf   pulse_max, A
+    ; otherwise ST_DEAD
+    bra     st_dead
 
-skip_peak:
 
-    ;----------------------------------------
-    ; 3) Check if adc_hi >= SIGNAL_HI (leading edge)
-    ;----------------------------------------
+;----------------------------------------
+; ST_IDLE: wait for threshold crossing
+;----------------------------------------
+st_idle:
+    ; if adc_hi < SIGNAL_HI -> stay idle
     movlw   SIGNAL_HI
-    subwf   adc_hi, W, A        ; W = adc_hi - SIGNAL_HI
-    btfss   STATUS, 0, A        ; C=1 if adc_hi >= SIGNAL_HI
-    bra     below_signal        ; below threshold ? handle reset logic
+    subwf   adc_hi, W, A            ; W = adc_hi - SIGNAL_HI
+    btfss   STATUS, 0, A            ; C=1 if adc_hi >= SIGNAL_HI
+    return
 
-    ; adc_hi >= SIGNAL_HI
-    ; Only trigger if we're armed (i.e. not already in a pulse)
-    movf    armed, F, A
-    btfsc   STATUS, 2, A        ; Z=1 if armed == 0
-    return                      ; already in a pulse, ignore this sample
+    ; Event detected: enter INPULSE and init peak
+    movlw   ST_INPULSE
+    movwf   adc_state, A
 
-    ;----------------------------------------
-    ; 4) New event detected!
-    ;----------------------------------------
-    movlw   0
-    movwf   armed, A            ; disarm until we fall below RESET_HI
-
-    ; initialise peak with this first above-threshold sample
     movf    adc_hi, W, A
     movwf   pulse_max, A
 
-    ; LED ON (visible flash)
-    movlw   200                 ; flash length in samples
-    movwf   led_flash, A        ; e.g. 200 * sample_period ? few ms
+    ; visible LED flash
+    movlw   200
+    movwf   led_flash, A
     bsf     LATD, 4, A
-    return
 
-below_signal:
-    ;----------------------------------------
-    ; 5) Below SIGNAL_HI: check reset level for re-arming
-    ;----------------------------------------
+    return
+    
+;----------------------------------------
+; ST_INPULSE: track peak until pulse ends,
+; then start fixed dead-time
+;----------------------------------------
+st_inpulse:
+    ; Update peak: if adc_hi > pulse_max, pulse_max = adc_hi
+    movf    adc_hi, W, A
+    subwf   pulse_max, W, A         ; W = pulse_max - adc_hi
+    btfsc   STATUS, 0, A            ; C=1 if pulse_max >= adc_hi
+    bra     inpulse_check_end
+
+    movf    adc_hi, W, A
+    movwf   pulse_max, A
+
+inpulse_check_end:
+    ; End-of-pulse condition (below RESET_HI)
     movlw   RESET_HI
-    subwf   adc_hi, W, A        ; W = adc_hi - RESET_HI
-    btfsc   STATUS, 0, A        ; C=1 if adc_hi >= RESET_HI
-    return                      ; not fully reset yet ? stay disarmed
+    subwf   adc_hi, W, A            ; W = adc_hi - RESET_HI
+    btfsc   STATUS, 0, A            ; C=1 if adc_hi >= RESET_HI
+    return                          ; still in pulse
 
-    ; Now adc_hi < RESET_HI -> re-arm for next event
-    movlw   1
-    movwf   armed, A
+    ; Pulse finished -> enter fixed dead-time
+    movlw   ST_DEAD
+    movwf   adc_state, A
 
-    ; *** IMPORTANT COMMENT:
-    ; At this point, pulse_max holds the FULL PEAK amplitude
-    ; of the *previous* pulse. This is where you will eventually
-    ; push (pulse_max, timestamp, etc.) into your SD log buffer.
+    movlw   DEAD_SAMPLES
+    movwf   dead_count, A
 
+    ; At this point, pulse_max holds the captured peak.
+    ; (Push to buffer / log later in main or another routine.)
     return
 
+;----------------------------------------
+; ST_DEAD: ignore events for DEAD_SAMPLES
+;----------------------------------------
+st_dead:
+    ; dead_count--
+    movf    dead_count, F, A
+    btfsc   STATUS, 2, A            ; already 0? (safety)
+    bra     dead_done
+
+    decfsz  dead_count, F, A
+    return                          ; still dead
+
+dead_done:
+    ; Dead-time complete -> go back to idle
+    movlw   ST_IDLE
+    movwf   adc_state, A
+    return
 
 ;------------------------------------------------
 ; RAM variables (in access bank)
@@ -300,7 +314,5 @@ dead_count:     ds 1   ; down-counter for dead-time
 irqCountL:      ds 1
 irqCountH:      ds 1
 led_flash:      ds 1
-armed:	        ds 1      ; 1 = ready to detect a new pulse, 0 = waiting for reset
-
     
     END     reset_vector
