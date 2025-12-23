@@ -86,7 +86,6 @@ irq_high:
     movwf   LATD, A         ; put it on PORTD LEDs
 
     ; Read ADC results
-    movf    ADRESH, W, A
     movwf   adc_hi, A
 
     ; Call state-machine handler
@@ -162,7 +161,6 @@ start:
     ; --- Initialise event detection state ---
     movlw   ST_IDLE
     movwf   adc_state, A
-    clrf    adc_state, A     ; ST_IDLE
     clrf    pulse_max, A
     clrf    dead_count, A
     clrf    adc_state, A
