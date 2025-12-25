@@ -51,6 +51,19 @@ DEAD_SAMPLES EQU 20
 
 LOG_REC_SIZE         EQU 8
 LOG_RECS_PER_SECTOR  EQU (512 / LOG_REC_SIZE)   ; =64
+  
+; =========================
+; Coincidence / ADC channel defs
+; =========================
+CH_TOP      EQU 0              ; top detector
+CH_BOT      EQU 1              ; bottom detector
+
+; ADC channels (PIC18F87J50 CHS codes)
+; CHS=0b0010 -> AN2, CHS=0b0011 -> AN3
+ADC_CHS_AN2 EQU 0x08           ; (CHS<<2) = (2<<2)=0x08
+ADC_CHS_AN3 EQU 0x0C           ; (3<<2)=0x0C
+
+COINC_WIN_SAMPLES EQU 2
 
 ; ============================================================
 ; Reset vector
@@ -86,7 +99,35 @@ irq_high:
     call    adc_sample_handler
 
     ; Start next conversion
+    ; advance sample index (16-bit)
+    incf    sampL, F, A
+    btfsc   STATUS, 2, A
+    incf    sampH, F, A
+
+    ; toggle channel: 0->1 or 1->0
+    movf    adc_ch, W, A
+    xorlw   0x01
+    movwf   adc_ch, A
+
+    ; set ADC channel select bits in ADCON0
+    ; keep ADON bit0 as-is, set CHS bits (5:2)
+    movf    ADCON0, W, A
+    andlw   0x03              ; keep bits1:0 (GO/DONE,ADON)
+    movwf   ADCON0, A
+
+    movf    adc_ch, W, A
+    bz      set_an2
+set_an3:
+    movlw   ADC_CHS_AN3
+    bra     set_chs_done
+set_an2:
+    movlw   ADC_CHS_AN2
+set_chs_done:
+    iorwf   ADCON0, F, A
+
+    ; start next conversion
     bsf     ADCON0, 1, A
+
 
 irq_exit:
     movff   saveBSR,    BSR
@@ -110,12 +151,30 @@ start:
     clrf    INTCON, A
     clrf    PIR1, A
     clrf    PIE1, A
+        ; init ADC mux state: start with TOP/AN2
+    clrf    adc_ch, A
+
+    ; sample index = 0
+    clrf    sampL, A
+    clrf    sampH, A
+
+    ; init per-channel detection vars
+    movlw   ST_IDLE
+    movwf   state0, A
+    movwf   state1, A
+    clrf    peak0, A
+    clrf    peak1, A
+    clrf    dead0, A
+    clrf    dead1, A
+    clrf    evt0_valid, A
+    clrf    evt1_valid, A
 
     ; -----------------------------
     ; GPIO directions
     ; -----------------------------
     ; ADC input RA2 / AN2
     bsf     TRISA, 2, A
+    bsf     TRISA, 3, A
 
     ; SD: RC3=SCK out, RC5=SDO out, RC4=SDI in
     bcf     TRISC, 3, A
@@ -149,10 +208,14 @@ start:
     ; -----------------------------
     ; ADC setup
     ; -----------------------------
-    movlw   0x09              ; select AN2, ADC on (your original)
-    movwf   ADCON0, A
-    movlw   0x82              ; right justify, timing as you had
+    movlw   0xF3              ; AN2 & AN3 analog (bits2,3=0), others digital
+    movwf   ANCON0, A
+    movlw   0x82
     movwf   ADCON1, A
+    ; ADCON0: ADON=1, GO=0, CHS=AN2 initially (CHS=2 -> bits5:2 = 0x08)
+    movlw   (ADC_CHS_AN2 | 0x01)   ; 0x08 | 0x01 = 0x09
+    movwf   ADCON0, A
+
 
     ; init event detection vars
     movlw   ST_IDLE
@@ -215,95 +278,203 @@ main_loop:
     bra     main_loop
 
 ; ============================================================
-; ADC sample handler (same logic, but now it calls log_append_event)
-;   On pulse end:
-;     - sample Timer0 into timestampL/H
-;     - call log_append_event (writes pulse_max + timestamp into log_buf)
+; adc_sample_handler_dual
+;  Uses:
+;    adc_hi = current sample (ADRESH)
+;    adc_ch = 0(top/AN2) or 1(bot/AN3)
+;    sampL/H = global sample index
 ; ============================================================
 adc_sample_handler:
-    ; LED flash countdown (optional)
-    movf    led_flash, F, A
-    btfsc   STATUS, 2, A
-    bra     adc_sm
-    decfsz  led_flash, F, A
-    bra     adc_sm
-    bcf     LATD, 4, A
+    ; select pointers/vars based on adc_ch
+    movf    adc_ch, W, A
+    bz      use_ch0
 
-adc_sm:
-    movf    adc_state, W, A
+; ---------- channel 1 (bottom) ----------
+use_ch1:
+    ; state in state1, peak in peak1, dead in dead1
+    movf    state1, W, A
     xorlw   ST_IDLE
     btfsc   STATUS, 2, A
-    bra     st_idle
+    bra     ch1_idle
 
-    movf    adc_state, W, A
+    movf    state1, W, A
     xorlw   ST_INPULSE
     btfsc   STATUS, 2, A
-    bra     st_inpulse
+    bra     ch1_inpulse
 
-    bra     st_dead
+    bra     ch1_dead
 
-st_idle:
+ch1_idle:
     movlw   SIGNAL_HI
     subwf   adc_hi, W, A
     btfss   STATUS, 0, A
     return
-
     movlw   ST_INPULSE
-    movwf   adc_state, A
+    movwf   state1, A
     movf    adc_hi, W, A
-    movwf   pulse_max, A
-
-    movlw   200
-    movwf   led_flash, A
-    bsf     LATD, 4, A
+    movwf   peak1, A
     return
 
-st_inpulse:
+ch1_inpulse:
     ; peak track
     movf    adc_hi, W, A
-    subwf   pulse_max, W, A
+    subwf   peak1, W, A
     btfsc   STATUS, 0, A
-    bra     inpulse_check_end
+    bra     ch1_check_end
     movf    adc_hi, W, A
-    movwf   pulse_max, A
+    movwf   peak1, A
 
-inpulse_check_end:
-    ; below RESET_HI ends pulse
+ch1_check_end:
     movlw   RESET_HI
     subwf   adc_hi, W, A
     btfsc   STATUS, 0, A
     return
 
-    ; pulse finished -> DEAD
+    ; pulse end -> latch event for ch1
     movlw   ST_DEAD
-    movwf   adc_state, A
+    movwf   state1, A
     movlw   DEAD_SAMPLES
-    movwf   dead_count, A
+    movwf   dead1, A
 
-    ; sample Timer0 timestamp
-    movf    TMR0L, W, A
-    movwf   timestampL, A
-    movf    TMR0H, W, A
-    movwf   timestampH, A
+    movlw   1
+    movwf   evt1_valid, A
+    movf    peak1, W, A
+    movwf   evt1_peak, A
+    movf    sampL, W, A
+    movwf   evt1_sampL, A
+    movf    sampH, W, A
+    movwf   evt1_sampH, A
 
-    ; append event into log buffer (DO NOT flush SD in ISR)
-    call    log_append_event
-    return
+    ; check coincidence
+    bra     check_coinc
 
-st_dead:
-    movf    dead_count, F, A
+ch1_dead:
+    movf    dead1, F, A
     btfsc   STATUS, 2, A
-    bra     dead_done
-    decfsz  dead_count, F, A
+    bra     ch1_dead_done
+    decfsz  dead1, F, A
     return
-dead_done:
+ch1_dead_done:
     movlw   ST_IDLE
-    movwf   adc_state, A
+    movwf   state1, A
+    return
+
+
+; ---------- channel 0 (top) ----------
+use_ch0:
+    movf    state0, W, A
+    xorlw   ST_IDLE
+    btfsc   STATUS, 2, A
+    bra     ch0_idle
+
+    movf    state0, W, A
+    xorlw   ST_INPULSE
+    btfsc   STATUS, 2, A
+    bra     ch0_inpulse
+
+    bra     ch0_dead
+    
+ch0_dead:
+    movf    dead0, F, A
+    btfsc   STATUS, 2, A
+    bra     ch0_dead_done
+    decfsz  dead0, F, A
+    return
+
+ch0_dead_done:
+    movlw   ST_IDLE
+    movwf   state0, A
+    return
+
+ch0_idle:
+    movlw   SIGNAL_HI
+    subwf   adc_hi, W, A
+    btfss   STATUS, 0, A
+    return
+    movlw   ST_INPULSE
+    movwf   state0, A
+    movf    adc_hi, W, A
+    movwf   peak0, A
+    return
+
+ch0_inpulse:
+    movf    adc_hi, W, A
+    subwf   peak0, W, A
+    btfsc   STATUS, 0, A
+    bra     ch0_check_end
+    movf    adc_hi, W, A
+    movwf   peak0, A
+
+ch0_check_end:
+    movlw   RESET_HI
+    subwf   adc_hi, W, A
+    btfsc   STATUS, 0, A
+    return
+
+    ; pulse end -> latch event for ch0
+    movlw   ST_DEAD
+    movwf   state0, A
+    movlw   DEAD_SAMPLES
+    movwf   dead0, A
+
+    movlw   1
+    movwf   evt0_valid, A
+    movf    peak0, W, A
+    movwf   evt0_peak, A
+    movf    sampL, W, A
+    movwf   evt0_sampL, A
+    movf    sampH, W, A
+    movwf   evt0_sampH, A
+
+    ; check coincidence
+    ; fallthrough
+
+
+; ---------- coincidence decision ----------
+check_coinc:
+    ; need both valid
+    movf    evt0_valid, F, A
+    btfsc   STATUS, 2, A
+    return
+    movf    evt1_valid, F, A
+    btfsc   STATUS, 2, A
+    return
+
+    ; compute abs(evt0 - evt1) into diffH:diffL
+    ; diff = |evt0_sampL - evt1_sampL|
+    movf    evt0_sampL, W, A
+    subwf   evt1_sampL, W, A      ; W = evt1L - evt0L
+    btfsc   STATUS, 0, A          ; C=1 means no borrow => evt1>=evt0
+    bra     got_diff
+    ; else take two's complement to abs
+    negf    WREG, A               ; W = -(evt1L-evt0L) = evt0L-evt1L
+got_diff:
+    ; now W = abs diff (low byte)
+    sublw   COINC_WIN_SAMPLES     ; compare: COINC_WIN_SAMPLES - diff
+    btfss   STATUS, 0, A          ; if borrow => diff > window
+    bra     not_coinc
+
+    ; --- coincident! ---
+    call    log_append_event
+    clrf    evt0_valid, A
+    clrf    evt1_valid, A
+    return
+
+not_coinc:
+    ; keep the most recent event only:
+    ; if evt0_sampL > evt1_sampL -> clear evt1, else clear evt0
+    movf    evt0_sampL, W, A
+    subwf   evt1_sampL, W, A      ; W = evt1L - evt0L
+    btfsc   STATUS, 0, A          ; C=1 => evt1>=evt0, so evt0 older
+    bra     clear_evt0
+    clrf    evt1_valid, A         ; evt1 older
+    return
+clear_evt0:
+    clrf    evt0_valid, A
     return
 
 ; ============================================================
 ; ---- SD / SPI / logging routines ----
-; (These are your routines mostly unchanged)
 ; ============================================================
 
 ; --- flush one full sector to SD ---
@@ -396,7 +567,7 @@ spi_wait:
 ; sd_clock_80: send 80 clock cycles with CS high
 ;------------------------------------------------
 sd_clock_80:
-SD_CS_HIGH               ; deselect card
+    SD_CS_HIGH               ; deselect card
     movlw   0x0A
     movwf   sd_tmp, A        ; 10 bytes * 8 clocks = 80 clocks
 clk80_loop:
@@ -1023,12 +1194,12 @@ sd_ver_fail:
 log_append_event:
     ; if log_full != 0 -> drop event quickly
     movf    log_full, F, A
-    btfss   STATUS, 2, A        ; Z=1 if log_full==0
+    btfss   STATUS, 2, A
     bra     log_drop
 
     ; offset = log_index * 8
     movf    log_index, W, A
-    mullw   8                   ; PRODL/PRODH = offset
+    mullw   8
 
     ; FSR0 = log_buf + offset
     movlw   low(log_buf)
@@ -1038,24 +1209,35 @@ log_append_event:
     addwfc  PRODH, W, A
     movwf   FSR0H, A
 
-    ; Write record
-    movf    pulse_max, W, A
-    movwf   POSTINC0, A         ; byte0 = peak
+      ; byte0 = peak_top
+    movf    evt0_peak, W, A
+    movwf   POSTINC0, A
 
-    movlw   0xAA
-    movwf   POSTINC0, A         ; byte1 marker/flags
+    ; byte1 = peak_bottom
+    movf    evt1_peak, W, A
+    movwf   POSTINC0, A
 
-    movf    timestampL, W, A
-    movwf   POSTINC0, A         ; byte2 time L
-    movf    timestampH, W, A
-    movwf   POSTINC0, A         ; byte3 time H
+    ; byte2-3 = top sample index
+    movf    evt0_sampL, W, A
+    movwf   POSTINC0, A
+    movf    evt0_sampH, W, A
+    movwf   POSTINC0, A
 
-    movlw   0x55
-    movwf   POSTINC0, A         ; byte4 marker/flags
+    ; byte4-5 = bottom sample index
+    movf    evt1_sampL, W, A
+    movwf   POSTINC0, A
+    movf    evt1_sampH, W, A
+    movwf   POSTINC0, A
 
-    clrf    POSTINC0, A         ; byte5
-    clrf    POSTINC0, A         ; byte6
-    clrf    POSTINC0, A         ; byte7
+    ; byte6 = flags
+    movlw   0xC0
+    movwf   POSTINC0, A
+
+    ; byte7 = marker
+    movlw   0xA5
+    movwf   POSTINC0, A
+
+    ; -----------------------------------------------
 
     ; log_index++
     incf    log_index, F, A
@@ -1158,6 +1340,33 @@ sd_crc:         ds 1
 sd_cntL:        ds 1
 sd_cntH:        ds 1
 sd_token:       ds 1
+    
+; --- ADC mux / sample index
+adc_ch:         ds 1          ; 0=top(AN2), 1=bot(AN3)
+sampL:          ds 1          ; 16-bit sample index
+sampH:          ds 1
+
+; --- per-channel states
+state0:         ds 1
+state1:         ds 1
+peak0:          ds 1
+peak1:          ds 1
+dead0:          ds 1
+dead1:          ds 1
+
+; --- latched event end info (pending for coincidence)
+evt0_valid:     ds 1
+evt1_valid:     ds 1
+evt0_peak:      ds 1
+evt1_peak:      ds 1
+evt0_sampL:     ds 1
+evt0_sampH:     ds 1
+evt1_sampL:     ds 1
+evt1_sampH:     ds 1
+
+; --- scratch for abs diff
+diffL:          ds 1
+diffH:          ds 1
 
 ; --- log buffer in BIGRAM
     PSECT   log_buf_ram, class=BIGRAM, space=1, noexec
